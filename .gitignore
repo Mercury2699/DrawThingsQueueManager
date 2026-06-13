@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# SQLite database files
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Generated output images
+outputs/dt_*
+outputs/*.png
+!outputs/.gitkeep
+
+# macOS system files
+.DS_Store

@@ -1,0 +1,715 @@
+// ==============================================================================
+// GLOBAL STATE & APIS
+// ==============================================================================
+const API = {
+    getModels: () => fetch('/api/models').then(r => r.json()),
+    getQueue: () => fetch('/api/queue').then(r => r.json()),
+    getHistory: () => fetch('/api/history').then(r => r.json()),
+    getStatus: () => fetch('/api/status').then(r => r.json()),
+    control: (action) => fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+    }).then(r => r.json()),
+    addToQueue: (data) => fetch('/api/queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+    }).then(r => r.json()),
+    deleteQueue: (id) => fetch(`/api/queue/${id}`, { method: 'DELETE' }).then(r => r.json()),
+    reorderQueue: (items) => fetch('/api/queue/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items })
+    }).then(r => r.json()),
+    getSettings: () => fetch('/api/settings').then(r => r.json()),
+    saveSettings: (settings) => fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+    }).then(r => r.json())
+};
+
+let state = {
+    models: [],
+    loras: [],
+    queue: [],
+    history: [],
+    status: { running: false, current_task: null, error_message: null },
+    settings: { draw_things_api: '' }
+};
+
+// ==============================================================================
+// INITIALIZATION
+// ==============================================================================
+document.addEventListener('DOMContentLoaded', () => {
+    initApp();
+});
+
+async function initApp() {
+    setupEventListeners();
+    await loadSettings();
+    await loadModels();
+    await refreshQueue();
+    await refreshHistory();
+    
+    // Start status polling loop
+    pollStatus();
+    setInterval(pollStatus, 1500);
+}
+
+// ==============================================================================
+// SETTINGS MANAGEMENT
+// ==============================================================================
+async function loadSettings() {
+    try {
+        state.settings = await API.getSettings();
+        document.getElementById('setting-api-url').value = state.settings.draw_things_api || '';
+    } catch (e) {
+        console.error("Failed to load settings:", e);
+    }
+}
+
+async function saveSettings() {
+    const apiUrl = document.getElementById('setting-api-url').value.trim();
+    if (!apiUrl) return;
+    
+    try {
+        await API.saveSettings({ draw_things_api: apiUrl });
+        state.settings.draw_things_api = apiUrl;
+        toggleModal('settings-modal', false);
+        showToast("Settings saved successfully!");
+    } catch (e) {
+        showToast("Failed to save settings: " + e.message, true);
+    }
+}
+
+// ==============================================================================
+// MODEL SCANNING & RENDERING
+// ==============================================================================
+async function loadModels() {
+    const modelsContainer = document.getElementById('models-list-container');
+    const lorasContainer = document.getElementById('loras-list-container');
+    
+    try {
+        const data = await API.getModels();
+        state.models = data.models;
+        state.loras = data.loras;
+        
+        // Populate settings modal paths
+        document.getElementById('models-folder-path').innerText = data.models_dir;
+        const statusEl = document.getElementById('models-folder-status');
+        if (data.models_dir_exists) {
+            statusEl.innerText = "✓ Active Models Folder Found";
+            statusEl.style.color = "var(--accent-green)";
+        } else {
+            statusEl.innerText = "✗ Models Folder Not Found. Using fallback defaults.";
+            statusEl.style.color = "var(--accent-red)";
+        }
+
+        // Render Models Checkboxes
+        if (state.models.length === 0) {
+            modelsContainer.innerHTML = '<div class="loading-inline">No models found in Draw Things folder.</div>';
+        } else {
+            modelsContainer.innerHTML = state.models.map((m, idx) => `
+                <label class="model-checkbox-label">
+                    <input type="checkbox" name="model" value="${m}" ${idx === 0 ? 'checked' : ''}>
+                    <span>${m}</span>
+                </label>
+            `).join('');
+        }
+
+        // Render LoRAs Checkboxes + Weight Sliders
+        if (state.loras.length === 0) {
+            lorasContainer.innerHTML = '<div class="loading-inline">No LoRAs found in Draw Things folder.</div>';
+        } else {
+            lorasContainer.innerHTML = state.loras.map((l) => `
+                <div class="lora-item-row" id="lora-row-${cleanId(l)}">
+                    <div class="lora-item-top">
+                        <label class="lora-checkbox-container">
+                            <input type="checkbox" name="lora-enable" value="${l}" onchange="toggleLoraSlider('${cleanId(l)}')">
+                            <span>${l}</span>
+                        </label>
+                    </div>
+                    <div class="lora-weight-container">
+                        <input type="range" class="lora-weight-slider" id="lora-weight-${cleanId(l)}" min="-2.0" max="2.0" step="0.05" value="1.0" oninput="updateLoraWeightVal('${cleanId(l)}')">
+                        <span class="lora-weight-value" id="lora-val-${cleanId(l)}">1.0</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+    } catch (e) {
+        console.error("Failed to load models/loras:", e);
+        modelsContainer.innerHTML = '<div class="loading-inline" style="color: var(--accent-red)">Error loading models directory.</div>';
+        lorasContainer.innerHTML = '<div class="loading-inline" style="color: var(--accent-red)">Error loading LoRAs directory.</div>';
+    }
+}
+
+function toggleLoraSlider(cleanedId) {
+    const row = document.getElementById(`lora-row-${cleanedId}`);
+    if (row) {
+        row.classList.toggle('active');
+    }
+}
+
+function updateLoraWeightVal(cleanedId) {
+    const slider = document.getElementById(`lora-weight-${cleanedId}`);
+    const valSpan = document.getElementById(`lora-val-${cleanedId}`);
+    if (slider && valSpan) {
+        valSpan.innerText = parseFloat(slider.value).toFixed(1);
+    }
+}
+
+function cleanId(filename) {
+    return filename.replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+// ==============================================================================
+// TASK CREATION
+// ==============================================================================
+async function handleTaskFormSubmit(e) {
+    e.preventDefault();
+    
+    const prompt = document.getElementById('prompt').value.trim();
+    const negativePrompt = document.getElementById('negative-prompt').value.trim();
+    const width = parseInt(document.getElementById('width').value);
+    const height = parseInt(document.getElementById('height').value);
+    const steps = parseInt(document.getElementById('steps').value);
+    const cfgScale = parseFloat(document.getElementById('cfg-scale').value);
+    const batchCount = parseInt(document.getElementById('batch-count').value);
+    const seed = parseInt(document.getElementById('seed').value);
+
+    // Selected Models
+    const modelCheckedElements = document.querySelectorAll('input[name="model"]:checked');
+    const selectedModels = Array.from(modelCheckedElements).map(el => el.value);
+    
+    if (selectedModels.length === 0) {
+        showToast("Please select at least one Base Model!", true);
+        return;
+    }
+
+    // Selected LoRAs
+    const selectedLoras = [];
+    const loraRows = document.querySelectorAll('.lora-item-row.active');
+    loraRows.forEach(row => {
+        const checkbox = row.querySelector('input[name="lora-enable"]');
+        const slider = row.querySelector('.lora-weight-slider');
+        if (checkbox && slider && checkbox.checked) {
+            selectedLoras.push({
+                file: checkbox.value,
+                weight: parseFloat(slider.value)
+            });
+        }
+    });
+
+    const taskData = {
+        prompt,
+        negative_prompt: negativePrompt,
+        models: selectedModels,
+        steps,
+        cfg_scale: cfgScale,
+        width,
+        height,
+        loras: selectedLoras,
+        batch_count: batchCount,
+        seed
+    };
+
+    try {
+        await API.addToQueue(taskData);
+        showToast("Task successfully queued!");
+        
+        // Reset only the prompt textarea, keep other settings for convenience
+        document.getElementById('prompt').value = '';
+        
+        await refreshQueue();
+    } catch (err) {
+        showToast("Failed to queue task: " + err.message, true);
+    }
+}
+
+// ==============================================================================
+// QUEUE RENDERING & INTERACTIONS
+// ==============================================================================
+async function refreshQueue() {
+    try {
+        state.queue = await API.getQueue();
+        renderQueue();
+    } catch (e) {
+        console.error("Error loading queue:", e);
+    }
+}
+
+function renderQueue() {
+    const container = document.getElementById('queue-list-container');
+    const countEl = document.getElementById('queue-count');
+    
+    countEl.innerText = `${state.queue.length} tasks`;
+    
+    if (state.queue.length === 0) {
+        container.innerHTML = '<div class="empty-state">Queue is empty.</div>';
+        return;
+    }
+    
+    container.innerHTML = state.queue.map((item, idx) => {
+        const isCurrent = state.status.current_task && state.status.current_task.queue_id === item.id;
+        const cardClass = `queue-item-card ${isCurrent ? 'processing' : item.status}`;
+        
+        const lorasList = item.loras.map(l => `${l.file.split('_lora_')[0]} (${l.weight})`).join(', ') || 'None';
+        
+        return `
+            <div class="${cardClass}" draggable="true" data-id="${item.id}" ondragstart="handleDragStart(event)" ondragover="handleDragOver(event)" ondrop="handleDrop(event)" ondragend="handleDragEnd(event)">
+                <div class="queue-item-top">
+                    <div class="queue-item-prompt" title="${item.prompt}">${item.prompt}</div>
+                    <div class="queue-item-actions">
+                        <button class="btn-card-action" onclick="moveQueueItem(${item.id}, 'up')" title="Move Up" ${idx === 0 ? 'disabled' : ''}>
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                        </button>
+                        <button class="btn-card-action" onclick="moveQueueItem(${item.id}, 'down')" title="Move Down" ${idx === state.queue.length - 1 ? 'disabled' : ''}>
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+                        </button>
+                        <button class="btn-card-action btn-delete" onclick="deleteQueueItem(${item.id})" title="Delete Task">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="queue-item-bottom">
+                    <div class="queue-item-models">
+                        ${item.models.map(m => `<span class="model-tag">${m}</span>`).join('')}
+                    </div>
+                    <div class="queue-meta-info">
+                        <span>L: ${lorasList}</span>
+                        <span>Size: ${item.width}x${item.height}</span>
+                        <span>Batch: ${item.batch_count}</span>
+                        <span class="badge badge-${item.status}">${item.status}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function deleteQueueItem(id) {
+    if (confirm("Are you sure you want to delete this task?")) {
+        try {
+            await API.deleteQueue(id);
+            await refreshQueue();
+        } catch (e) {
+            showToast("Failed to delete queue item", true);
+        }
+    }
+}
+
+async function moveQueueItem(id, direction) {
+    const curIdx = state.queue.findIndex(item => item.id === id);
+    if (curIdx === -1) return;
+    
+    let targetIdx = direction === 'up' ? curIdx - 1 : curIdx + 1;
+    if (targetIdx < 0 || targetIdx >= state.queue.length) return;
+    
+    // Swap positions locally
+    const items = [...state.queue];
+    const temp = items[curIdx];
+    items[curIdx] = items[targetIdx];
+    items[targetIdx] = temp;
+    
+    // Update priorities
+    const reorderPayload = items.map((item, idx) => ({
+        id: item.id,
+        priority: idx + 1
+    }));
+    
+    try {
+        await API.reorderQueue(reorderPayload);
+        await refreshQueue();
+    } catch (e) {
+        showToast("Failed to reorder queue", true);
+    }
+}
+
+// ==============================================================================
+// DRAG AND DROP REORDERING
+// ==============================================================================
+let draggedElement = null;
+
+function handleDragStart(e) {
+    draggedElement = e.currentTarget;
+    draggedElement.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', draggedElement.getAttribute('data-id'));
+}
+
+function handleDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    return false;
+}
+
+function handleDrop(e) {
+    e.stopPropagation();
+    e.preventDefault();
+    
+    const targetElement = e.currentTarget;
+    if (draggedElement && draggedElement !== targetElement) {
+        const listContainer = document.getElementById('queue-list-container');
+        const cards = Array.from(listContainer.querySelectorAll('.queue-item-card'));
+        
+        const draggedIndex = cards.indexOf(draggedElement);
+        const targetIndex = cards.indexOf(targetElement);
+        
+        if (draggedIndex < targetIndex) {
+            listContainer.insertBefore(draggedElement, targetElement.nextSibling);
+        } else {
+            listContainer.insertBefore(draggedElement, targetElement);
+        }
+        
+        // Save new order to server
+        const updatedCards = Array.from(listContainer.querySelectorAll('.queue-item-card'));
+        const reorderPayload = updatedCards.map((card, idx) => ({
+            id: parseInt(card.getAttribute('data-id')),
+            priority: idx + 1
+        }));
+        
+        API.reorderQueue(reorderPayload).then(() => {
+            refreshQueue();
+        });
+    }
+}
+
+function handleDragEnd(e) {
+    if (draggedElement) {
+        draggedElement.classList.remove('dragging');
+        draggedElement = null;
+    }
+}
+
+// ==============================================================================
+// PROGRESS POLLING & CONTROL
+// ==============================================================================
+let lastWorkerRunning = null;
+let lastTaskId = null;
+
+async function pollStatus() {
+    const dot = document.getElementById('server-status-dot');
+    const text = document.getElementById('server-status-text');
+    const toggleBtn = document.getElementById('btn-toggle-queue');
+    const toggleText = document.getElementById('btn-toggle-text');
+    const playIcon = toggleBtn.querySelector('.icon-play');
+    const pauseIcon = toggleBtn.querySelector('.icon-pause');
+    
+    try {
+        const data = await API.getStatus();
+        state.status = data;
+        
+        // 1. Connection Indicator
+        dot.className = "status-indicator connected";
+        text.innerText = data.running ? "API Running (Queue Active)" : "API Connected (Queue Paused)";
+        
+        // 2. Play/Pause Button State
+        if (data.running) {
+            toggleBtn.className = "btn btn-secondary";
+            toggleText.innerText = "Pause Queue";
+            playIcon.classList.add('hidden');
+            pauseIcon.classList.remove('hidden');
+            dot.classList.add('processing');
+        } else {
+            toggleBtn.className = "btn btn-primary";
+            toggleText.innerText = "Resume Queue";
+            playIcon.classList.remove('hidden');
+            pauseIcon.classList.add('hidden');
+            dot.classList.remove('processing');
+        }
+        
+        // 3. Active Task details
+        const emptyState = document.getElementById('task-empty-state');
+        const activeState = document.getElementById('task-active-state');
+        
+        if (data.current_task) {
+            emptyState.classList.add('hidden');
+            activeState.classList.remove('hidden');
+            
+            document.getElementById('active-prompt').innerText = data.current_task.prompt;
+            document.getElementById('active-model').innerText = data.current_task.model;
+            document.getElementById('active-seed').innerText = data.current_task.seed;
+            document.getElementById('active-progress-text').innerText = `Image ${data.current_task.image_index}/${data.current_task.total_images}`;
+            document.getElementById('active-progress-bar').style.width = `${data.current_task.percentage}%`;
+            
+            // Auto refresh queue when generating to update active class in lists
+            refreshQueue();
+        } else {
+            emptyState.classList.remove('hidden');
+            activeState.classList.add('hidden');
+        }
+        
+        // 4. If queue worker just finished a job, trigger history reload
+        const currentTaskId = data.current_task ? data.current_task.queue_id : null;
+        if (lastTaskId !== null && currentTaskId === null) {
+            // Task finished
+            refreshQueue();
+            refreshHistory();
+        }
+        lastTaskId = currentTaskId;
+        
+        if (data.error_message && data.error_message !== state.last_error) {
+            showToast(data.error_message, true);
+            state.last_error = data.error_message;
+        }
+
+    } catch (e) {
+        dot.className = "status-indicator disconnected";
+        text.innerText = "Offline - Check queue_manager.py server";
+        toggleBtn.className = "btn btn-primary";
+        toggleText.innerText = "Resume Queue";
+        playIcon.classList.remove('hidden');
+        pauseIcon.classList.add('hidden');
+    }
+}
+
+async function toggleQueue() {
+    const action = state.status.running ? "pause" : "start";
+    try {
+        await API.control(action);
+        await pollStatus();
+        showToast(action === 'start' ? "Queue loop started!" : "Queue loop paused.");
+    } catch (e) {
+        showToast("Error toggling queue status", true);
+    }
+}
+
+async function clearCompleted() {
+    try {
+        await API.control("clear_completed");
+        await refreshQueue();
+        showToast("Completed tasks cleared.");
+    } catch (e) {
+        showToast("Error clearing completed items", true);
+    }
+}
+
+// ==============================================================================
+// GALLERY HISTORY
+// ==============================================================================
+async function refreshHistory() {
+    try {
+        state.history = await API.getHistory();
+        renderHistory();
+    } catch (e) {
+        console.error("Error fetching history:", e);
+    }
+}
+
+function renderHistory() {
+    const container = document.getElementById('gallery-container');
+    const countEl = document.getElementById('gallery-count');
+    
+    countEl.innerText = `Total: ${state.history.length} images`;
+    
+    if (state.history.length === 0) {
+        container.innerHTML = `
+            <div class="empty-gallery">
+                <p>No images generated yet. Start the queue to populate the gallery.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = state.history.map(item => {
+        if (item.status === 'failed') {
+            return `
+                <div class="gallery-item-card" onclick="openImageDetails(${item.id})">
+                    <div class="gallery-card-fail">
+                        <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                        <strong>Generation Failed</strong>
+                        <p>${item.error_message ? item.error_message.substring(0, 40) + '...' : 'Unknown Error'}</p>
+                    </div>
+                    <div class="gallery-item-overlay">
+                        <div class="gallery-item-prompt">${item.prompt}</div>
+                        <div class="gallery-item-model">${item.model}</div>
+                        <div class="gallery-item-seed">Failed</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        return `
+            <div class="gallery-item-card" onclick="openImageDetails(${item.id})">
+                <img class="gallery-img" src="/outputs/${item.filename}" alt="Image" loading="lazy">
+                <div class="gallery-item-overlay">
+                    <div class="gallery-item-prompt">${item.prompt}</div>
+                    <div class="gallery-item-model">${item.model}</div>
+                    <div class="gallery-item-seed">Seed: ${item.seed}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+// ==============================================================================
+// DETAILED MODALS & UTILS
+// ==============================================================================
+function openImageDetails(historyId) {
+    const item = state.history.find(h => h.id === historyId);
+    if (!item) return;
+    
+    document.getElementById('image-modal-title').innerText = item.status === 'success' ? `Seed: ${item.seed}` : 'Generation Failed';
+    
+    const imgEl = document.getElementById('image-modal-img');
+    if (item.status === 'success') {
+        imgEl.src = `/outputs/${item.filename}`;
+        imgEl.style.display = 'block';
+    } else {
+        imgEl.style.display = 'none';
+    }
+    
+    document.getElementById('image-info-prompt').innerText = item.prompt;
+    document.getElementById('image-info-negative').innerText = item.negative_prompt || 'None';
+    document.getElementById('image-info-model').innerText = item.model;
+    document.getElementById('image-info-seed').innerText = item.seed;
+    document.getElementById('image-info-steps').innerText = item.steps || 'N/A';
+    document.getElementById('image-info-cfg').innerText = item.cfg_scale || 'N/A';
+    document.getElementById('image-info-dim').innerText = `${item.width}x${item.height}`;
+    document.getElementById('image-info-date').innerText = new Date(item.created_at).toLocaleString();
+    
+    // LoRA rendering
+    const lorasContainer = document.getElementById('image-info-loras');
+    if (item.loras && item.loras.length > 0) {
+        lorasContainer.innerHTML = item.loras.map(l => `
+            <span class="tag-lora">${l.file} (${l.weight})</span>
+        `).join('');
+    } else {
+        lorasContainer.innerHTML = '<span class="tag-lora" style="background: rgba(255,255,255,0.03); color: var(--text-dim)">None</span>';
+    }
+    
+    // Requeue action
+    const btnRequeue = document.getElementById('btn-modal-requeue');
+    btnRequeue.onclick = () => {
+        reuseParameters(item);
+        toggleModal('image-modal', false);
+    };
+    
+    // File Link
+    const btnOpenFolder = document.getElementById('btn-modal-open-folder');
+    if (item.status === 'success') {
+        btnOpenFolder.href = `/outputs/${item.filename}`;
+        btnOpenFolder.classList.remove('hidden');
+    } else {
+        btnOpenFolder.classList.add('hidden');
+    }
+    
+    toggleModal('image-modal', true);
+}
+
+function reuseParameters(item) {
+    // Populate form inputs
+    document.getElementById('prompt').value = item.prompt;
+    document.getElementById('negative-prompt').value = item.negative_prompt || '';
+    document.getElementById('width').value = item.width;
+    document.getElementById('height').value = item.height;
+    document.getElementById('steps').value = item.steps || 8;
+    document.getElementById('cfg-scale').value = item.cfg_scale || 1.0;
+    document.getElementById('seed').value = item.seed;
+    
+    // Select base model
+    const modelCheckboxes = document.querySelectorAll('input[name="model"]');
+    modelCheckboxes.forEach(cb => {
+        cb.checked = (cb.value === item.model);
+    });
+    
+    // Reset and select LoRAs
+    const loraRows = document.querySelectorAll('.lora-item-row');
+    loraRows.forEach(row => {
+        row.classList.remove('active');
+        const cb = row.querySelector('input[name="lora-enable"]');
+        const slider = row.querySelector('.lora-weight-slider');
+        const valSpan = row.querySelector('.lora-weight-value');
+        if (cb && slider && valSpan) {
+            cb.checked = false;
+            
+            // Check if this LoRA was active in the historical item
+            const foundLora = item.loras.find(l => l.file === cb.value);
+            if (foundLora) {
+                cb.checked = true;
+                row.classList.add('active');
+                slider.value = foundLora.weight;
+                valSpan.innerText = parseFloat(foundLora.weight).toFixed(1);
+            }
+        }
+    });
+    
+    showToast("Parameters copied to Creator Form!");
+}
+
+function toggleModal(modalId, forceState = null) {
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+    
+    if (forceState !== null) {
+        if (forceState) modal.classList.remove('hidden');
+        else modal.classList.add('hidden');
+    } else {
+        modal.classList.toggle('hidden');
+    }
+}
+
+// Simple Toast Notification
+function showToast(message, isError = false) {
+    const toast = document.createElement('div');
+    toast.style.position = 'fixed';
+    toast.style.bottom = '24px';
+    toast.style.right = '24px';
+    toast.style.background = isError ? 'var(--accent-red)' : 'var(--primary-grad)';
+    toast.style.color = '#fff';
+    toast.style.padding = '12px 24px';
+    toast.style.borderRadius = 'var(--radius-sm)';
+    toast.style.boxShadow = 'var(--shadow-md)';
+    toast.style.fontSize = '14px';
+    toast.style.fontWeight = '600';
+    toast.style.zIndex = '9999';
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(10px)';
+    toast.style.transition = 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)';
+    toast.innerText = message;
+    
+    document.body.appendChild(toast);
+    
+    // Trigger animation
+    setTimeout(() => {
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateY(0)';
+    }, 10);
+    
+    // Remove toast
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(10px)';
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+// ==============================================================================
+// EVENT LISTENERS
+// ==============================================================================
+function setupEventListeners() {
+    // Task submission
+    document.getElementById('task-form').addEventListener('submit', handleTaskFormSubmit);
+    
+    // Control bar
+    document.getElementById('btn-toggle-queue').addEventListener('click', toggleQueue);
+    document.getElementById('btn-clear-completed').addEventListener('click', clearCompleted);
+    
+    // Settings modal triggers
+    document.getElementById('btn-settings').addEventListener('click', () => toggleModal('settings-modal', true));
+    document.getElementById('btn-close-settings').addEventListener('click', () => toggleModal('settings-modal', false));
+    document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
+    
+    // Image details close
+    document.getElementById('btn-close-image').addEventListener('click', () => toggleModal('image-modal', false));
+    
+    // Click outside to close modals
+    window.addEventListener('click', (e) => {
+        const settingsModal = document.getElementById('settings-modal');
+        const imageModal = document.getElementById('image-modal');
+        if (e.target === settingsModal) toggleModal('settings-modal', false);
+        if (e.target === imageModal) toggleModal('image-modal', false);
+    });
+}
