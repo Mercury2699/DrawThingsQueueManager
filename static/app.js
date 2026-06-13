@@ -47,54 +47,57 @@ let sizeState = {
 };
 
 function updateDimensions() {
-    let r = sizeState.ratio;
-    let s = sizeState.size;
-    let w = s;
-    let h = s;
-    
-    // Parse ratio values
-    let parts = r.split(':');
-    let x = parseInt(parts[0]);
-    let y = parseInt(parts[1]);
-    
-    if (x === y) {
-        w = s;
-        h = s;
-    } else if (x < y) { // Portrait (e.g. 2:3)
-        h = s;
-        w = s * x / y;
-        if (w < 512) {
-            w = 512;
-            h = 512 * y / x;
+    try {
+        let r = sizeState.ratio || '1:1';
+        let s = sizeState.size || 1024;
+        let w = s;
+        let h = s;
+        
+        let parts = r.split(':');
+        let x = parseInt(parts[0]);
+        let y = parseInt(parts[1]);
+        
+        if (x === y) {
+            w = s;
+            h = s;
+        } else if (x < y) { // Portrait (e.g. 2:3)
+            h = s;
+            w = s * x / y;
+            if (w < 512) {
+                w = 512;
+                h = 512 * y / x;
+            }
+        } else { // Landscape (e.g. 4:3, 16:9)
+            w = s;
+            h = s * y / x;
+            if (h < 512) {
+                h = 512;
+                w = 512 * x / y;
+            }
         }
-    } else { // Landscape (e.g. 4:3, 16:9)
-        w = s;
-        h = s * y / x;
-        if (h < 512) {
-            h = 512;
-            w = 512 * x / y;
+        
+        if (sizeState.swapped && x !== y) {
+            let temp = w;
+            w = h;
+            h = temp;
         }
+        
+        w = Math.round(w / 32) * 32;
+        h = Math.round(h / 32) * 32;
+        
+        w = Math.max(512, Math.min(2048, w));
+        h = Math.max(512, Math.min(2048, h));
+        
+        const widthInput = document.getElementById('width');
+        const heightInput = document.getElementById('height');
+        const displaySpan = document.getElementById('size-value-display');
+        
+        if (widthInput) widthInput.value = w;
+        if (heightInput) heightInput.value = h;
+        if (displaySpan) displaySpan.innerText = `${s}px`;
+    } catch (e) {
+        console.error("Error updating dimensions:", e);
     }
-    
-    // Apply orientation swap (invert landscape <-> portrait)
-    if (sizeState.swapped && x !== y) {
-        let temp = w;
-        w = h;
-        h = temp;
-    }
-    
-    // Round to nearest multiple of 32
-    w = Math.round(w / 32) * 32;
-    h = Math.round(h / 32) * 32;
-    
-    // Clamp to bounds
-    w = Math.max(512, Math.min(2048, w));
-    h = Math.max(512, Math.min(2048, h));
-    
-    // Update DOM inputs
-    document.getElementById('width').value = w;
-    document.getElementById('height').value = h;
-    document.getElementById('size-value-display').innerText = `${s}px`;
 }
 
 function setSizeStateFromDimensions(w, h) {
@@ -156,12 +159,17 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function initApp() {
+    updateDimensions(); // Set initial dimensions instantly!
     setupEventListeners();
-    await loadSettings();
-    await loadModels();
-    await refreshQueue();
-    await refreshHistory();
-    updateDimensions(); // Set initial dimensions
+    
+    try {
+        await loadSettings();
+        await loadModels();
+        await refreshQueue();
+        await refreshHistory();
+    } catch (e) {
+        console.error("Failed loading app data during initialization:", e);
+    }
     
     // Start status polling loop
     pollStatus();
@@ -801,46 +809,61 @@ function showToast(message, isError = false) {
 // EVENT LISTENERS
 // ==============================================================================
 function setupEventListeners() {
+    // Helper to safely bind click events
+    function safeAddListener(id, event, callback) {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener(event, callback);
+        } else {
+            console.warn(`Element with id '${id}' not found for event '${event}'`);
+        }
+    }
+
     // Task submission
-    document.getElementById('task-form').addEventListener('submit', handleTaskFormSubmit);
+    safeAddListener('task-form', 'submit', handleTaskFormSubmit);
     
     // Aspect ratio selection
-    const ratioButtons = document.querySelectorAll('.btn-ratio');
-    ratioButtons.forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            ratioButtons.forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            sizeState.ratio = btn.getAttribute('data-ratio');
-            updateDimensions();
+    try {
+        const ratioButtons = document.querySelectorAll('.btn-ratio');
+        ratioButtons.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                ratioButtons.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                sizeState.ratio = btn.getAttribute('data-ratio');
+                updateDimensions();
+            });
         });
-    });
+    } catch (err) {
+        console.error("Error setting up ratio buttons:", err);
+    }
 
     // Swap orientation
-    const swapBtn = document.getElementById('btn-ratio-swap');
-    swapBtn.addEventListener('click', () => {
+    safeAddListener('btn-ratio-swap', 'click', () => {
+        const swapBtn = document.getElementById('btn-ratio-swap');
         sizeState.swapped = !sizeState.swapped;
-        swapBtn.classList.toggle('swapped', sizeState.swapped);
+        if (swapBtn) {
+            swapBtn.classList.toggle('swapped', sizeState.swapped);
+        }
         updateDimensions();
     });
 
     // Size slider input
-    const sizeSlider = document.getElementById('size-slider');
-    sizeSlider.addEventListener('input', (e) => {
+    safeAddListener('size-slider', 'input', (e) => {
         sizeState.size = parseInt(e.target.value);
         updateDimensions();
     });
 
     // Control bar
-    document.getElementById('btn-toggle-queue').addEventListener('click', toggleQueue);
-    document.getElementById('btn-clear-completed').addEventListener('click', clearCompleted);
+    safeAddListener('btn-toggle-queue', 'click', toggleQueue);
+    safeAddListener('btn-clear-completed', 'click', clearCompleted);
     
     // Settings modal triggers
-    document.getElementById('btn-settings').addEventListener('click', () => toggleModal('settings-modal', true));
-    document.getElementById('btn-close-settings').addEventListener('click', () => toggleModal('settings-modal', false));
-    document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
+    safeAddListener('btn-settings', 'click', () => toggleModal('settings-modal', true));
+    safeAddListener('btn-close-settings', 'click', () => toggleModal('settings-modal', false));
+    safeAddListener('btn-save-settings', 'click', saveSettings);
     
     // Image details close
-    document.getElementById('btn-close-image').addEventListener('click', () => toggleModal('image-modal', false));
+    safeAddListener('btn-close-image', 'click', () => toggleModal('image-modal', false));
     
     // Click outside to close modals
     window.addEventListener('click', (e) => {
