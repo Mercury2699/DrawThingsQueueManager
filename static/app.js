@@ -88,6 +88,8 @@ function updateDimensions() {
         if (widthInput) widthInput.value = w;
         if (heightInput) heightInput.value = h;
         if (displaySpan) displaySpan.innerText = `${s}px`;
+        
+        saveParamsToLocalStorage(); // Auto-save on dimensions change
     } catch (e) {
         console.error("Error updating dimensions:", e);
     }
@@ -138,6 +140,126 @@ function setSizeStateFromDimensions(w, h) {
     updateDimensions();
 }
 
+function saveParamsToLocalStorage() {
+    try {
+        const promptEl = document.getElementById('prompt');
+        const negEl = document.getElementById('negative-prompt');
+        const stepsEl = document.getElementById('steps');
+        const cfgEl = document.getElementById('cfg-scale');
+        const batchEl = document.getElementById('batch-count');
+        const seedEl = document.getElementById('seed');
+        
+        const params = {
+            prompt: promptEl ? promptEl.value : '',
+            negative_prompt: negEl ? negEl.value : '',
+            steps: stepsEl ? parseInt(stepsEl.value) : 8,
+            cfg_scale: cfgEl ? parseFloat(cfgEl.value) : 1.0,
+            batch_count: batchEl ? parseInt(batchEl.value) : 2,
+            seed: seedEl ? parseInt(seedEl.value) : -1,
+            ratio: sizeState.ratio,
+            size: sizeState.size,
+            
+            // Models selection
+            models: Array.from(document.querySelectorAll('input[name="model"]:checked')).map(el => el.value),
+            
+            // LoRAs selection
+            loras: Array.from(document.querySelectorAll('.lora-item-row.active')).map(row => {
+                const cb = row.querySelector('input[name="lora-enable"]');
+                const slider = row.querySelector('.lora-weight-slider');
+                return {
+                    file: cb ? cb.value : '',
+                    weight: slider ? parseFloat(slider.value) : 1.0
+                };
+            })
+        };
+        localStorage.setItem('dt_queue_params', JSON.stringify(params));
+    } catch (e) {
+        console.error("Error saving parameters to localStorage:", e);
+    }
+}
+
+function restoreParamsFromLocalStorage() {
+    try {
+        const dataStr = localStorage.getItem('dt_queue_params');
+        if (!dataStr) {
+            // Default batch count to 2 if no history settings
+            const batchEl = document.getElementById('batch-count');
+            if (batchEl) batchEl.value = 2;
+            return;
+        }
+        
+        const params = JSON.parse(dataStr);
+        if (!params) return;
+        
+        // Restore values
+        if (params.prompt !== undefined && document.getElementById('prompt')) 
+            document.getElementById('prompt').value = params.prompt;
+        if (params.negative_prompt !== undefined && document.getElementById('negative-prompt')) 
+            document.getElementById('negative-prompt').value = params.negative_prompt;
+        if (params.steps !== undefined && document.getElementById('steps')) 
+            document.getElementById('steps').value = params.steps;
+        if (params.cfg_scale !== undefined && document.getElementById('cfg-scale')) 
+            document.getElementById('cfg-scale').value = params.cfg_scale;
+        
+        // Set batch-count (safely defaulting to 2)
+        const batchEl = document.getElementById('batch-count');
+        if (batchEl) {
+            batchEl.value = params.batch_count !== undefined ? params.batch_count : 2;
+        }
+        
+        if (params.seed !== undefined && document.getElementById('seed')) 
+            document.getElementById('seed').value = params.seed;
+        
+        if (params.ratio) sizeState.ratio = params.ratio;
+        if (params.size) sizeState.size = params.size;
+        
+        // Update active ratio buttons
+        const ratioButtons = document.querySelectorAll('.btn-ratio');
+        ratioButtons.forEach(btn => {
+            if (btn.getAttribute('data-ratio') === sizeState.ratio) btn.classList.add('active');
+            else btn.classList.remove('active');
+        });
+        
+        // Update size slider
+        const sizeSlider = document.getElementById('size-slider');
+        if (sizeSlider && params.size) {
+            sizeSlider.value = params.size;
+        }
+        
+        updateDimensions();
+        
+        // Restore models checkmarks
+        if (params.models && Array.isArray(params.models)) {
+            const modelCheckboxes = document.querySelectorAll('input[name="model"]');
+            modelCheckboxes.forEach(cb => {
+                cb.checked = params.models.includes(cb.value);
+            });
+        }
+        
+        // Restore LoRAs checkmarks & sliders
+        if (params.loras && Array.isArray(params.loras)) {
+            params.loras.forEach(savedLora => {
+                const cleaned = cleanId(savedLora.file);
+                const row = document.getElementById(`lora-row-${cleaned}`);
+                if (row) {
+                    const cb = row.querySelector('input[name="lora-enable"]');
+                    const slider = row.querySelector('.lora-weight-slider');
+                    const valSpan = row.querySelector('.lora-weight-value');
+                    
+                    if (cb && slider) {
+                        cb.checked = true;
+                        row.classList.add('active');
+                        slider.value = savedLora.weight;
+                        if (valSpan) valSpan.innerText = parseFloat(savedLora.weight).toFixed(1);
+                    }
+                }
+            });
+        }
+    } catch (e) {
+        console.error("Error restoring parameters from localStorage:", e);
+    }
+}
+
 // ==============================================================================
 // INITIALIZATION
 // ==============================================================================
@@ -152,6 +274,7 @@ async function initApp() {
     try {
         await loadSettings();
         await loadModels();
+        restoreParamsFromLocalStorage(); // Restore from localStorage
         await refreshQueue();
         await refreshHistory();
     } catch (e) {
@@ -808,6 +931,13 @@ function setupEventListeners() {
 
     // Task submission
     safeAddListener('task-form', 'submit', handleTaskFormSubmit);
+    
+    // Auto-save form inputs
+    const taskForm = document.getElementById('task-form');
+    if (taskForm) {
+        taskForm.addEventListener('input', saveParamsToLocalStorage);
+        taskForm.addEventListener('change', saveParamsToLocalStorage);
+    }
     
     // Aspect ratio selection
     try {
