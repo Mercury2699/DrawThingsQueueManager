@@ -39,6 +39,115 @@ let state = {
     settings: { draw_things_api: '' }
 };
 
+// Image Dimension / Aspect Ratio State
+let sizeState = {
+    ratio: '1:1',
+    size: 1024,
+    swapped: false
+};
+
+function updateDimensions() {
+    let r = sizeState.ratio;
+    let s = sizeState.size;
+    let w = s;
+    let h = s;
+    
+    // Parse ratio values
+    let parts = r.split(':');
+    let x = parseInt(parts[0]);
+    let y = parseInt(parts[1]);
+    
+    if (x === y) {
+        w = s;
+        h = s;
+    } else if (x < y) { // Portrait (e.g. 2:3)
+        h = s;
+        w = s * x / y;
+        if (w < 512) {
+            w = 512;
+            h = 512 * y / x;
+        }
+    } else { // Landscape (e.g. 4:3, 16:9)
+        w = s;
+        h = s * y / x;
+        if (h < 512) {
+            h = 512;
+            w = 512 * x / y;
+        }
+    }
+    
+    // Apply orientation swap (invert landscape <-> portrait)
+    if (sizeState.swapped && x !== y) {
+        let temp = w;
+        w = h;
+        h = temp;
+    }
+    
+    // Round to nearest multiple of 32
+    w = Math.round(w / 32) * 32;
+    h = Math.round(h / 32) * 32;
+    
+    // Clamp to bounds
+    w = Math.max(512, Math.min(2048, w));
+    h = Math.max(512, Math.min(2048, h));
+    
+    // Update DOM inputs
+    document.getElementById('width').value = w;
+    document.getElementById('height').value = h;
+    document.getElementById('size-value-display').innerText = `${s}px`;
+}
+
+function setSizeStateFromDimensions(w, h) {
+    let q = w / h;
+    let size = Math.max(w, h);
+    let ratio = '1:1';
+    let swapped = false;
+    
+    if (Math.abs(q - 1.0) < 0.05) {
+        ratio = '1:1';
+        swapped = false;
+    } else if (Math.abs(q - 0.666) < 0.05 || Math.abs(q - 1.5) < 0.05) {
+        ratio = '2:3';
+        swapped = (w > h); // 2:3 is vertical by default, so if width is larger it's swapped (3:2 landscape)
+    } else if (Math.abs(q - 1.333) < 0.05 || Math.abs(q - 0.75) < 0.05) {
+        ratio = '4:3';
+        swapped = (w < h); // 4:3 is landscape by default, so if height is larger it's swapped (3:4 portrait)
+    } else if (Math.abs(q - 1.777) < 0.05 || Math.abs(q - 0.562) < 0.05) {
+        ratio = '16:9';
+        swapped = (w < h); // 16:9 is landscape by default, so if height is larger it's swapped (9:16 portrait)
+    } else {
+        // Fallback: if it's some custom size, we retain the exact values
+        document.getElementById('width').value = w;
+        document.getElementById('height').value = h;
+        return;
+    }
+    
+    sizeState.ratio = ratio;
+    sizeState.size = size;
+    sizeState.swapped = swapped;
+    
+    // Update active class on ratio buttons
+    const ratioButtons = document.querySelectorAll('.btn-ratio');
+    ratioButtons.forEach(btn => {
+        if (btn.getAttribute('data-ratio') === ratio) btn.classList.add('active');
+        else btn.classList.remove('active');
+    });
+    
+    // Update swap orientation class
+    const swapBtn = document.getElementById('btn-ratio-swap');
+    if (swapBtn) {
+        swapBtn.classList.toggle('swapped', swapped);
+    }
+    
+    // Update slider value
+    const sizeSlider = document.getElementById('size-slider');
+    if (sizeSlider) {
+        sizeSlider.value = size;
+    }
+    
+    updateDimensions();
+}
+
 // ==============================================================================
 // INITIALIZATION
 // ==============================================================================
@@ -52,6 +161,7 @@ async function initApp() {
     await loadModels();
     await refreshQueue();
     await refreshHistory();
+    updateDimensions(); // Set initial dimensions
     
     // Start status polling loop
     pollStatus();
@@ -603,11 +713,12 @@ function reuseParameters(item) {
     // Populate form inputs
     document.getElementById('prompt').value = item.prompt;
     document.getElementById('negative-prompt').value = item.negative_prompt || '';
-    document.getElementById('width').value = item.width;
-    document.getElementById('height').value = item.height;
     document.getElementById('steps').value = item.steps || 8;
     document.getElementById('cfg-scale').value = item.cfg_scale || 1.0;
     document.getElementById('seed').value = item.seed;
+    
+    // Set custom resolution and slider match
+    setSizeStateFromDimensions(item.width, item.height);
     
     // Select base model
     const modelCheckboxes = document.querySelectorAll('input[name="model"]');
@@ -693,6 +804,32 @@ function setupEventListeners() {
     // Task submission
     document.getElementById('task-form').addEventListener('submit', handleTaskFormSubmit);
     
+    // Aspect ratio selection
+    const ratioButtons = document.querySelectorAll('.btn-ratio');
+    ratioButtons.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            ratioButtons.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            sizeState.ratio = btn.getAttribute('data-ratio');
+            updateDimensions();
+        });
+    });
+
+    // Swap orientation
+    const swapBtn = document.getElementById('btn-ratio-swap');
+    swapBtn.addEventListener('click', () => {
+        sizeState.swapped = !sizeState.swapped;
+        swapBtn.classList.toggle('swapped', sizeState.swapped);
+        updateDimensions();
+    });
+
+    // Size slider input
+    const sizeSlider = document.getElementById('size-slider');
+    sizeSlider.addEventListener('input', (e) => {
+        sizeState.size = parseInt(e.target.value);
+        updateDimensions();
+    });
+
     // Control bar
     document.getElementById('btn-toggle-queue').addEventListener('click', toggleQueue);
     document.getElementById('btn-clear-completed').addEventListener('click', clearCompleted);

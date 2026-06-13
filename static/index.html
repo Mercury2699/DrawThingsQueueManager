@@ -113,25 +113,38 @@
                         </div>
                     </div>
 
-                    <!-- Image Generation Settings Grid -->
-                    <div class="form-grid-2">
-                        <div class="form-group">
-                            <label for="width">Width (宽)</label>
-                            <select id="width">
-                                <option value="512">512px</option>
-                                <option value="576" selected>576px</option>
-                                <option value="768">768px</option>
-                                <option value="1024">1024px</option>
-                            </select>
+                    <!-- Aspect Ratio & Size Controls -->
+                    <div class="form-group">
+                        <label>Aspect Ratio (图片比例)</label>
+                        <div class="aspect-ratio-selector">
+                            <button type="button" class="btn-ratio active" data-ratio="1:1">1:1</button>
+                            <button type="button" class="btn-ratio" data-ratio="2:3">2:3</button>
+                            <button type="button" class="btn-ratio" data-ratio="4:3">4:3</button>
+                            <button type="button" class="btn-ratio" data-ratio="16:9">16:9</button>
+                            <button type="button" class="btn-ratio-swap" id="btn-ratio-swap" title="Swap Orientation (切换横竖)">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M8 7H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3"/><path d="M20 7h-3a2 2 0 0 0-2 2v3"/><polyline points="16 3 20 7 16 11"/></svg>
+                            </button>
                         </div>
-                        <div class="form-group">
-                            <label for="height">Height (高)</label>
-                            <select id="height">
-                                <option value="512">512px</option>
-                                <option value="576">576px</option>
-                                <option value="768">768px</option>
-                                <option value="1024" selected>1024px</option>
-                            </select>
+                    </div>
+
+                    <div class="form-group">
+                        <div class="slider-header">
+                            <label for="size-slider">Image Size (基准大小)</label>
+                            <span class="slider-value-display" id="size-value-display">1024px</span>
+                        </div>
+                        <input type="range" id="size-slider" min="512" max="2048" step="32" value="1024" class="size-slider-input">
+                    </div>
+
+                    <!-- Hidden/Read-only resolution display -->
+                    <div class="resolution-display-box">
+                        <div class="res-item">
+                            <span class="res-label">Width (宽)</span>
+                            <input type="number" id="width" readonly value="1024">
+                        </div>
+                        <div class="res-divider">×</div>
+                        <div class="res-item">
+                            <span class="res-label">Height (高)</span>
+                            <input type="number" id="height" readonly value="1024">
                         </div>
                     </div>
 
