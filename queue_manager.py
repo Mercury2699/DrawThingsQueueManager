@@ -341,7 +341,9 @@ class QueueWorker:
             "width": width,
             "height": height,
             "model": model,
-            "loras": formatted_loras
+            "loras": formatted_loras,
+            "batch_size": 1,
+            "n_iter": 1
         }
 
         filename = f"dt_{int(time.time())}_{seed}.png"
