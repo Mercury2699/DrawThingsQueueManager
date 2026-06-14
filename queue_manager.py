@@ -81,6 +81,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             queue_id INTEGER,
             prompt TEXT NOT NULL,
+            negative_prompt TEXT,
             model TEXT NOT NULL,
             seed INTEGER NOT NULL,
             steps INTEGER,
@@ -94,6 +95,12 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # Ensure negative_prompt column exists in history table (migration)
+    try:
+        cursor.execute("ALTER TABLE history ADD COLUMN negative_prompt TEXT")
+    except sqlite3.OperationalError:
+        pass
     
     # Settings table
     cursor.execute("""
@@ -285,6 +292,9 @@ class QueueWorker:
                             self.running = False
                             task_aborted = True
                             break
+
+                    # Add a 2-second cooldown to let the GPU clear and write files
+                    time.sleep(2.0)
             
             if task_aborted:
                 # If we paused, mark the queue item back to pending (so we can resume or re-run)
@@ -302,12 +312,18 @@ class QueueWorker:
             # Update final status of queue item
             final_status = 'completed' if failed_count == 0 else ('failed' if success_count == 0 else 'completed')
             
+            # Show 100% completion in state for a brief moment
+            if self.current_task:
+                self.current_task["percentage"] = 100
+                self.current_task["image_index"] = total_images
+            
             conn = get_db()
             cursor = conn.cursor()
             cursor.execute("UPDATE queue SET status = ? WHERE id = ?", (final_status, item_id))
             conn.commit()
             conn.close()
             
+            time.sleep(0.5)
             self.current_task = None
             time.sleep(0.5)
 
@@ -349,14 +365,27 @@ class QueueWorker:
         filename = f"dt_{int(time.time())}_{seed}.png"
         filepath = os.path.join(OUTPUT_DIR, filename)
 
-        # We will attempt the API call. If it fails (busy/empty/timeout), we wait 15 seconds and try once more.
-        attempts = 2
+        # Retry logic:
+        # If the server is busy (returns empty images list), we wait 5 seconds and retry (up to 60 times).
+        # For other errors, we retry up to 3 times.
+        max_busy_retries = 60
+        max_other_retries = 3
+        
+        busy_count = 0
+        other_count = 0
+        
         last_error = ""
         response_data = None
+        
+        while True:
+            # Check if queue loop was paused/stopped by user
+            with self._lock:
+                if not self.running:
+                    last_error = "Task paused by user."
+                    break
 
-        for attempt in range(1, attempts + 1):
             try:
-                print(f"  -> Sending API request (Attempt {attempt}/{attempts})...")
+                print(f"  -> Sending API request (Busy: {busy_count}/{max_busy_retries}, Other: {other_count}/{max_other_retries})...")
                 response = requests.post(
                     api_endpoint, 
                     json=payload, 
@@ -366,19 +395,21 @@ class QueueWorker:
                 
                 if response.status_code != 200:
                     last_error = f"API error: HTTP {response.status_code} - {response.text[:200]}"
-                    print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                    if attempt < attempts:
-                        print("  Waiting 15 seconds to let GPU clear before retrying...")
-                        time.sleep(15)
+                    print(f"  [WARNING] HTTP error: {last_error}")
+                    other_count += 1
+                    if other_count >= max_other_retries:
+                        break
+                    time.sleep(5)
                     continue
 
                 data = response.json()
                 if "images" not in data or not data["images"]:
-                    last_error = f"API response contained no images. Response JSON: {json.dumps(data)[:200]}"
-                    print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                    if attempt < attempts:
-                        print("  Waiting 15 seconds to let GPU clear before retrying...")
-                        time.sleep(15)
+                    last_error = "Draw Things is currently busy generating an image."
+                    print(f"  [BUSY] Draw Things is busy. Waiting 5 seconds to retry...")
+                    busy_count += 1
+                    if busy_count >= max_busy_retries:
+                        break
+                    time.sleep(5)
                     continue
 
                 # Success!
@@ -387,27 +418,30 @@ class QueueWorker:
 
             except requests.exceptions.Timeout:
                 last_error = "Timeout: Generation request took longer than 30 minutes."
-                print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                if attempt < attempts:
-                    print("  Waiting 15 seconds to let GPU clear before retrying...")
-                    time.sleep(15)
+                print(f"  [WARNING] Timeout error: {last_error}")
+                other_count += 1
+                if other_count >= max_other_retries:
+                    break
+                time.sleep(5)
             except requests.exceptions.ConnectionError:
                 last_error = "ConnectionError: Could not connect to Draw Things API. Is it running?"
-                print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                if attempt < attempts:
-                    print("  Waiting 15 seconds to let GPU clear before retrying...")
-                    time.sleep(15)
+                print(f"  [WARNING] Connection error: {last_error}")
+                other_count += 1
+                if other_count >= max_other_retries:
+                    break
+                time.sleep(5)
             except Exception as e:
                 last_error = f"Exception: {str(e)}"
-                print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                if attempt < attempts:
-                    print("  Waiting 15 seconds to let GPU clear before retrying...")
-                    time.sleep(15)
+                print(f"  [WARNING] Unexpected exception: {last_error}")
+                other_count += 1
+                if other_count >= max_other_retries:
+                    break
+                time.sleep(5)
 
         if not response_data:
-            # Both attempts failed
+            # All attempts failed
             self.error_message = last_error
-            self._save_history_fail(queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, last_error)
+            self._save_history_fail(queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, last_error)
             return False
 
         # Save base64 image to file
@@ -420,26 +454,26 @@ class QueueWorker:
             conn = get_db()
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO history (queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, filename, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success')
-            """, (queue_id, prompt, model, seed, steps, cfg_scale, width, height, json.dumps(loras), filename))
+                INSERT INTO history (queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, filename, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success')
+            """, (queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, json.dumps(loras), filename))
             conn.commit()
             conn.close()
             return True
         except Exception as e:
             err_msg = f"Failed to save image file: {str(e)}"
             self.error_message = err_msg
-            self._save_history_fail(queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, err_msg)
+            self._save_history_fail(queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, err_msg)
             return False
 
-    def _save_history_fail(self, queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, error_message):
+    def _save_history_fail(self, queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, error_message):
         try:
             conn = get_db()
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO history (queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, filename, status, error_message)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'failed', ?)
-            """, (queue_id, prompt, model, seed, steps, cfg_scale, width, height, json.dumps(loras), error_message))
+                INSERT INTO history (queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, filename, status, error_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'failed', ?)
+            """, (queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, json.dumps(loras), error_message))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -666,6 +700,7 @@ def get_history(limit: int = 50, offset: int = 0):
             "id": r["id"],
             "queue_id": r["queue_id"],
             "prompt": r["prompt"],
+            "negative_prompt": r["negative_prompt"],
             "model": r["model"],
             "seed": r["seed"],
             "steps": r["steps"],
