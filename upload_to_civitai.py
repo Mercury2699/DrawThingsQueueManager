@@ -548,11 +548,19 @@ def main():
                 display_prompt = prompt_text[:50] + "..." if len(prompt_text) > 50 else (prompt_text or "[No Prompt]")
                 print(f"\n📁 Processing group: '{display_prompt}' ({len(grp_images)} images)")
                 
-                # Use first image model version for the post draft container
-                first_img_path, first_idx, first_meta = grp_images[0]
-                first_model_version = resolve_model_version_id(first_img_path, first_idx, first_meta)
+                # Check if all images in this prompt group share the same model version
+                model_versions_in_group = set()
+                for img_path, original_idx, meta in grp_images:
+                    mv = resolve_model_version_id(img_path, original_idx, meta)
+                    model_versions_in_group.add(mv)
                 
-                post_id = create_post(session, first_model_version)
+                if len(model_versions_in_group) == 1:
+                    post_model_version = list(model_versions_in_group)[0]
+                else:
+                    post_model_version = None
+                    print(f"   [INFO] Multiple base models detected in group ({model_versions_in_group}). Creating a general post container.")
+                
+                post_id = create_post(session, post_model_version)
                 
                 # Upload and add all images in this prompt group
                 for index, (img_path, original_idx, meta) in enumerate(grp_images):
