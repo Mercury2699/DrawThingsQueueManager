@@ -32,21 +32,30 @@ def load_cookies_from_json(cookie_file):
         raise FileNotFoundError(f"Cookie file not found: {cookie_file}")
     
     with open(cookie_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+        content = f.read().strip()
         
     cookies = {}
-    if isinstance(data, list):
-        # Browser exported cookies (EditThisCookie / Cookie-Editor format)
-        for entry in data:
-            if isinstance(entry, dict) and 'name' in entry and 'value' in entry:
-                cookies[entry['name']] = entry['value']
-    elif isinstance(data, dict):
-        if 'cookies' in data:
-            # civitai_client format
-            cookies = data['cookies']
-        else:
-            # Simple key-value format
-            cookies = data
+    if content.startswith('{') or content.startswith('['):
+        data = json.loads(content)
+        if isinstance(data, list):
+            # Browser exported cookies (EditThisCookie / Cookie-Editor format)
+            for entry in data:
+                if isinstance(entry, dict) and 'name' in entry and 'value' in entry:
+                    cookies[entry['name']] = entry['value']
+        elif isinstance(data, dict):
+            if 'cookies' in data:
+                # civitai_client format
+                cookies = data['cookies']
+            else:
+                # Simple key-value format
+                cookies = data
+    else:
+        # Treat as raw Semicolon-separated cookie string (e.g. copied from Network headers)
+        for item in content.split(';'):
+            item = item.strip()
+            if '=' in item:
+                k, v = item.split('=', 1)
+                cookies[k.strip()] = v.strip()
     return cookies
 
 def verify_session(session):
