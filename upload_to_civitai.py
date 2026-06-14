@@ -296,7 +296,7 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
     base_model_name = meta.get('Model')
     if base_model_name:
         resources.append({
-            "type": "model",
+            "type": "checkpoint",
             "name": base_model_name,
             "modelVersionId": model_version_id
         })
