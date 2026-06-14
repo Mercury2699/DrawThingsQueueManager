@@ -365,20 +365,17 @@ class QueueWorker:
         filename = f"dt_{int(time.time())}_{seed}.png"
         filepath = os.path.join(OUTPUT_DIR, filename)
 
-        # Retry logic: At most 2 attempts in total (1 initial + 1 retry)
-        attempts = 2
         last_error = ""
         response_data = None
         
-        for attempt in range(1, attempts + 1):
-            # Check if queue loop was paused/stopped by user
-            with self._lock:
-                if not self.running:
-                    last_error = "Task paused by user."
-                    break
+        # Check if queue loop was paused/stopped by user
+        with self._lock:
+            if not self.running:
+                last_error = "Task paused by user."
 
+        if not last_error:
             try:
-                print(f"  -> Sending API request (Attempt {attempt}/{attempts})...")
+                print("  -> Sending API request...")
                 response = requests.post(
                     api_endpoint, 
                     json=payload, 
@@ -388,46 +385,28 @@ class QueueWorker:
                 
                 if response.status_code != 200:
                     last_error = f"API error: HTTP {response.status_code} - {response.text[:200]}"
-                    print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                    if attempt < attempts:
-                        print("  Waiting 5 seconds to let GPU clear before retrying...")
-                        time.sleep(5)
-                    continue
-
-                data = response.json()
-                if "images" not in data or not data["images"]:
-                    last_error = "Draw Things returned an empty images list (app may be busy or generation cancelled)."
-                    print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                    if attempt < attempts:
-                        print("  Waiting 5 seconds to let GPU clear before retrying...")
-                        time.sleep(5)
-                    continue
-
-                # Success!
-                response_data = data
-                break
+                    print(f"  [WARNING] Generation failed: {last_error}")
+                else:
+                    data = response.json()
+                    if "images" not in data or not data["images"]:
+                        last_error = "Draw Things returned an empty images list (app may be busy or generation cancelled)."
+                        print(f"  [WARNING] Generation failed: {last_error}")
+                    else:
+                        # Success!
+                        response_data = data
 
             except requests.exceptions.Timeout:
                 last_error = "Timeout: Generation request took longer than 30 minutes."
-                print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                if attempt < attempts:
-                    print("  Waiting 5 seconds to let GPU clear before retrying...")
-                    time.sleep(5)
+                print(f"  [WARNING] Generation failed: {last_error}")
             except requests.exceptions.ConnectionError:
                 last_error = "ConnectionError: Could not connect to Draw Things API. Is it running?"
-                print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                if attempt < attempts:
-                    print("  Waiting 5 seconds to let GPU clear before retrying...")
-                    time.sleep(5)
+                print(f"  [WARNING] Generation failed: {last_error}")
             except Exception as e:
                 last_error = f"Exception: {str(e)}"
-                print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
-                if attempt < attempts:
-                    print("  Waiting 5 seconds to let GPU clear before retrying...")
-                    time.sleep(5)
+                print(f"  [WARNING] Generation failed: {last_error}")
 
         if not response_data:
-            # All attempts failed
+            # Generation failed
             self.error_message = last_error
             self._save_history_fail(queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, last_error)
             return False
