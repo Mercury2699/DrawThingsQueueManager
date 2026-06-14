@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+# /// script
+# dependencies = [
+#   "requests",
+#   "pillow",
+#   "blurhash-python",
+# ]
+# ///
+
+import os
+import re
+import sys
+import json
+import uuid
+import datetime
+import argparse
+import requests
+from urllib.parse import urljoin
+from PIL import Image
+
+CIVITAI_ROOT = "https://civitai.red"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": CIVITAI_ROOT,
+    "Accept": "application/json",
+}
+
+def load_cookies_from_json(cookie_file):
+    if not os.path.exists(cookie_file):
+        raise FileNotFoundError(f"Cookie file not found: {cookie_file}")
+    
+    with open(cookie_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+        
+    cookies = {}
+    if isinstance(data, list):
+        # Browser exported cookies (EditThisCookie / Cookie-Editor format)
+        for entry in data:
+            if isinstance(entry, dict) and 'name' in entry and 'value' in entry:
+                cookies[entry['name']] = entry['value']
+    elif isinstance(data, dict):
+        if 'cookies' in data:
+            # civitai_client format
+            cookies = data['cookies']
+        else:
+            # Simple key-value format
+            cookies = data
+    return cookies
+
+def verify_session(session):
+    print("Verifying session on Civitai.red...")
+    resp = session.get(CIVITAI_ROOT)
+    resp.raise_for_status()
+    
+    # Search for __NEXT_DATA__
+    match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', resp.text)
+    if not match:
+        print("Warning: Could not find __NEXT_DATA__ in page source. Checking backup creator info endpoint...")
+        try:
+            r = session.post(
+                f"{CIVITAI_ROOT}/api/trpc/user.getCreatorInfo",
+                json={"json": {}}
+            )
+            if r.status_code == 200:
+                print("Session seems valid (API responded successfully).")
+                return True
+        except:
+            pass
+        return False
+        
+    try:
+        page_data = json.loads(match.group(1))
+        session_data = page_data.get("props", {}).get("pageProps", {}).get("session", {})
+        if session_data and "user" in session_data:
+            user = session_data["user"]
+            print(f"✅ Success! Logged in as: {user.get('username')} (ID: {user.get('id')}, Email: {user.get('email')})")
+            return True
+        else:
+            print("❌ Error: No active session found. Please make sure your cookies are up to date.")
+            return False
+    except Exception as e:
+        print(f"❌ Failed to parse session data: {e}")
+        return False
+
+def extract_metadata_from_png(local_file):
+    try:
+        img = Image.open(local_file)
+        # Check standard "parameters" chunk first
+        params_str = img.info.get("parameters")
+        if not params_str:
+            # Check "Description" chunk (often used by Draw Things or other tools)
+            params_str = img.info.get("Description")
+            
+        if not params_str:
+            return {}
+            
+        # If the description chunk is JSON (e.g. Draw Things JSON metadata format)
+        if params_str.strip().startswith("{") and params_str.strip().endswith("}"):
+            try:
+                dt_meta = json.loads(params_str)
+                # Map Draw Things JSON fields to Civitai fields
+                meta = {}
+                if "prompt" in dt_meta:
+                    meta["prompt"] = dt_meta["prompt"]
+                if "negative_prompt" in dt_meta:
+                    meta["negativePrompt"] = dt_meta["negative_prompt"]
+                if "cfg_scale" in dt_meta:
+                    meta["cfgScale"] = float(dt_meta["cfg_scale"])
+                if "steps" in dt_meta:
+                    meta["steps"] = int(dt_meta["steps"])
+                if "sampler" in dt_meta:
+                    meta["sampler"] = dt_meta["sampler"]
+                if "seed" in dt_meta:
+                    meta["seed"] = int(dt_meta["seed"])
+                if "width" in dt_meta and "height" in dt_meta:
+                    meta["Size"] = f"{dt_meta['width']}x{dt_meta['height']}"
+                return meta
+            except json.JSONDecodeError:
+                pass
+
+        meta = {}
+        # Parse standard SD WebUI text block
+        parts = params_str.split("\n")
+        prompt_lines = []
+        neg_prompt = ""
+        params_line = ""
+        
+        for part in parts:
+            if part.startswith("Negative prompt:"):
+                neg_prompt = part[len("Negative prompt:"):].strip()
+            elif "Steps:" in part and "Seed:" in part:
+                params_line = part.strip()
+            else:
+                if not neg_prompt and not params_line:
+                    prompt_lines.append(part)
+                    
+        meta['prompt'] = "\n".join(prompt_lines).strip()
+        if neg_prompt:
+            meta['negativePrompt'] = neg_prompt
+            
+        if params_line:
+            param_dict = {}
+            for item in params_line.split(","):
+                if ":" in item:
+                    k, v = item.split(":", 1)
+                    param_dict[k.strip().lower()] = v.strip()
+                    
+            if 'steps' in param_dict:
+                meta['steps'] = int(param_dict['steps'])
+            if 'cfg scale' in param_dict:
+                meta['cfgScale'] = float(param_dict['cfg scale'])
+            if 'sampler' in param_dict:
+                meta['sampler'] = param_dict['sampler']
+            if 'seed' in param_dict:
+                meta['seed'] = int(param_dict['seed'])
+            if 'size' in param_dict:
+                meta['Size'] = param_dict['size']
+                
+        return meta
+    except Exception as e:
+        print(f"Failed to parse image metadata: {e}")
+        return {}
+
+def get_blurhash(local_file):
+    try:
+        import blurhash
+        import numpy as np
+        img = Image.open(local_file).convert("RGB")
+        img.thumbnail((32, 32))
+        bhash = blurhash.encode(np.array(img), x_components=4, y_components=4)
+        return bhash
+    except Exception as e:
+        # Return a valid fallback gray-rect blurhash if package is missing or fails
+        return "L6PZ|aJ-0y~w.w_N_4ob_4-;_4W["
+
+def upload_image(session, local_file):
+    filename = os.path.basename(local_file)
+    print(f"1. Requesting upload ticket for {filename}...")
+    resp = session.post(
+        f"{CIVITAI_ROOT}/api/image-upload",
+        json={
+            "filename": filename,
+            "metadata": {}
+        }
+    )
+    resp.raise_for_status()
+    ticket = resp.json()
+    
+    upload_id = ticket['id']
+    upload_url = ticket['uploadURL']
+    
+    print(f"2. Uploading file binary content ({os.path.getsize(local_file)} bytes) to S3...")
+    with open(local_file, 'rb') as f:
+        # DO NOT use the session cookies or custom headers for S3 PUT
+        # as it will result in S3 SignatureDoesNotMatch error.
+        put_resp = requests.put(upload_url, data=f)
+        put_resp.raise_for_status()
+        
+    print("3. Image file uploaded to S3 successfully.")
+    return upload_id
+
+def create_post(session, model_version_id=None):
+    print("4. Creating new post draft...")
+    payload = {
+        "json": {
+            "modelVersionId": model_version_id,
+            "authed": True
+        }
+    }
+    resp = session.post(
+        f"{CIVITAI_ROOT}/api/trpc/post.create",
+        json=payload
+    )
+    resp.raise_for_status()
+    res = resp.json()
+    if 'error' in res:
+        raise Exception(f"Failed to create post: {res['error']}")
+    post_id = res['result']['data']['json']['id']
+    print(f"5. Created post draft (ID: {post_id})")
+    return post_id
+
+def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, model_version_id=None):
+    filename = os.path.basename(local_file)
+    img = Image.open(local_file)
+    width, height = img.size
+    
+    bhash = get_blurhash(local_file)
+    meta = extract_metadata_from_png(local_file)
+    
+    print(f"6. Registering image {filename} to post draft...")
+    payload = {
+        "json": {
+            "type": "image",
+            "index": index,
+            "uuid": str(uuid.uuid4()),
+            "name": filename,
+            "meta": meta,
+            "url": upload_image_id,
+            "mimeType": "image/png" if local_file.lower().endswith('.png') else "image/jpeg",
+            "hash": bhash,
+            "width": width,
+            "height": height,
+            "status": "uploading",
+            "postId": post_id,
+            "modelVersionId": model_version_id,
+            "authed": True
+        }
+    }
+    resp = session.post(
+        f"{CIVITAI_ROOT}/api/trpc/post.addImage",
+        json=payload
+    )
+    resp.raise_for_status()
+    res = resp.json()
+    if 'error' in res:
+        raise Exception(f"Failed to add image to post: {res['error']}")
+    print("7. Image successfully registered to post draft.")
+
+def add_tag_to_post(session, post_id, tag_name):
+    print(f"8. Adding tag '{tag_name}'...")
+    payload = {
+        "json": {
+            "id": post_id,
+            "name": tag_name,
+            "authed": True
+        }
+    }
+    resp = session.post(
+        f"{CIVITAI_ROOT}/api/trpc/post.addTag",
+        json=payload
+    )
+    resp.raise_for_status()
+    res = resp.json()
+    if 'error' in res:
+        print(f"   [WARNING] Failed to add tag '{tag_name}': {res['error']['message']}")
+
+def publish_post(session, post_id, title=None, detail=None, nsfw=False):
+    print("9. Publishing post...")
+    payload = {
+        "json": {
+            "id": post_id,
+            "title": title,
+            "detail": detail,
+            "nsfw": nsfw,
+            "publishedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        },
+        "meta": {
+            "values": {
+                "publishedAt": ["Date"]
+            }
+        }
+    }
+    resp = session.post(
+        f"{CIVITAI_ROOT}/api/trpc/post.update",
+        json=payload
+    )
+    resp.raise_for_status()
+    res = resp.json()
+    if 'error' in res:
+        raise Exception(f"Failed to publish post: {res['error']}")
+    
+    post_url = f"{CIVITAI_ROOT}/posts/{post_id}"
+    print(f"\n🎉 SUCCESS! Post published successfully!")
+    print(f"👉 Link: {post_url}")
+    return post_url
+
+def main():
+    parser = argparse.ArgumentParser(description="Upload showcase images directly to Civitai.red")
+    parser.add_argument("--image", required=True, help="Path to local image file to upload")
+    parser.add_argument("--cookies", default="cookies.json", help="Path to cookies.json file (default: cookies.json)")
+    parser.add_argument("--tags", nargs="*", default=[], help="Optional list of tags for the post")
+    parser.add_argument("--title", help="Optional title for the post")
+    parser.add_argument("--description", help="Optional description/detail markdown for the post")
+    parser.add_argument("--nsfw", action="store_true", help="Flag the post as mature/NSFW")
+    parser.add_argument("--model-version", type=int, help="Optional model version ID to link the image to")
+    
+    args = parser.parse_args()
+    
+    if not os.path.exists(args.image):
+        print(f"Error: Image file not found: {args.image}")
+        sys.exit(1)
+        
+    try:
+        cookies = load_cookies_from_json(args.cookies)
+    except FileNotFoundError:
+        print(f"Error: Cookies file not found: {args.cookies}")
+        print("Please export your civitai.red cookies using a browser extension and save as cookies.json.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error loading cookies: {e}")
+        sys.exit(1)
+        
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.cookies.update(cookies)
+    
+    if not verify_session(session):
+        print("Error: Could not verify session. Your cookies may have expired.")
+        sys.exit(1)
+        
+    try:
+        # Step 1: Upload image to S3
+        upload_id = upload_image(session, args.image)
+        
+        # Step 2: Create post draft
+        post_id = create_post(session, args.model_version)
+        
+        # Step 3: Add S3 image to post
+        add_image_to_post(session, post_id, upload_id, args.image, index=0, model_version_id=args.model_version)
+        
+        # Step 4: Add tags
+        for tag in args.tags:
+            add_tag_to_post(session, post_id, tag)
+            
+        # Step 5: Publish post
+        publish_post(session, post_id, title=args.title, detail=args.description, nsfw=args.nsfw)
+        
+    except Exception as e:
+        print(f"\n❌ Error during upload process: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
