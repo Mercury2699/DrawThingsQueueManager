@@ -443,7 +443,7 @@ class QueueWorker:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO history (queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, filename, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success')
             """, (queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, json.dumps(loras), filename))
             conn.commit()
             conn.close()
