@@ -522,7 +522,7 @@ def main():
         
     try:
         if args.group_by_prompt:
-            # 1. Group images by prompt and base model version
+            # 1. Group images by prompt only (even if base models are different)
             prompt_groups = {}
             for idx, img_path in enumerate(valid_image_paths):
                 meta = extract_metadata_from_png(img_path)
@@ -532,32 +532,31 @@ def main():
                 if not normalized_prompt:
                     normalized_prompt = "__no_prompt__"
                     
-                model_version = resolve_model_version_id(img_path, idx, meta)
-                group_key = (normalized_prompt, model_version)
-                
-                if group_key not in prompt_groups:
-                    prompt_groups[group_key] = {
+                if normalized_prompt not in prompt_groups:
+                    prompt_groups[normalized_prompt] = {
                         "prompt": prompt,
-                        "model_version": model_version,
-                        "model_name": meta.get('Model', 'Unknown Model'),
                         "images": []
                     }
-                prompt_groups[group_key]["images"].append((img_path, idx, meta))
+                prompt_groups[normalized_prompt]["images"].append((img_path, idx, meta))
                 
-            print(f"\n📂 Found {len(prompt_groups)} distinct prompt + model groups across {len(valid_image_paths)} images.")
+            print(f"\n📂 Found {len(prompt_groups)} distinct prompt groups across {len(valid_image_paths)} images.")
             
-            for (p_key, model_version), group in prompt_groups.items():
+            for p_key, group in prompt_groups.items():
                 prompt_text = group["prompt"]
-                model_name = group["model_name"]
                 grp_images = group["images"]
                 
                 display_prompt = prompt_text[:50] + "..." if len(prompt_text) > 50 else (prompt_text or "[No Prompt]")
-                print(f"\n📁 Processing group: '{display_prompt}' | Model: {model_name} (Version: {model_version}) ({len(grp_images)} images)")
+                print(f"\n📁 Processing group: '{display_prompt}' ({len(grp_images)} images)")
                 
-                post_id = create_post(session, model_version)
+                # Use first image model version for the post draft container
+                first_img_path, first_idx, first_meta = grp_images[0]
+                first_model_version = resolve_model_version_id(first_img_path, first_idx, first_meta)
+                
+                post_id = create_post(session, first_model_version)
                 
                 # Upload and add all images in this prompt group
                 for index, (img_path, original_idx, meta) in enumerate(grp_images):
+                    model_version = resolve_model_version_id(img_path, original_idx, meta)
                     model_name = meta.get('Model', 'Unknown Model')
                     print(f"   [{index+1}/{len(grp_images)}] Uploading {os.path.basename(img_path)} (Model: {model_name} -> Version: {model_version})")
                     
