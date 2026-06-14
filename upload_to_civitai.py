@@ -221,13 +221,82 @@ def create_post(session, model_version_id=None):
     print(f"   Created draft post container (ID: {post_id})")
     return post_id
 
-def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, model_version_id=None):
+def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, model_version_id=None, normalized_mapping=None):
     filename = os.path.basename(local_file)
     img = Image.open(local_file)
     width, height = img.size
     
     bhash = get_blurhash(local_file)
     meta = extract_metadata_from_png(local_file)
+    
+    # 1. Build resources list
+    resources = []
+    
+    # Add base model resource
+    base_model_name = meta.get('Model')
+    if base_model_name:
+        resources.append({
+            "type": "model",
+            "name": base_model_name,
+            "modelVersionId": model_version_id
+        })
+        
+    # Detect LoRAs
+    detected_loras = []
+    
+    # From Draw Things Description JSON metadata
+    desc = img.info.get("Description") or ""
+    if desc.strip().startswith("{") and desc.strip().endswith("}"):
+        try:
+            dt_meta = json.loads(desc)
+            dt_loras = dt_meta.get("loras", [])
+            for lora in dt_loras:
+                lora_file = lora.get("file")
+                if lora_file:
+                    detected_loras.append(lora_file)
+        except:
+            pass
+            
+    # From prompt text tags <lora:name:weight>
+    prompt = meta.get('prompt', '')
+    lora_matches = re.findall(r'<lora:([^:]+):([^>]+)>', prompt)
+    for match in lora_matches:
+        detected_loras.append(match[0])
+        
+    # Deduplicate LoRAs preserving order
+    seen_loras = set()
+    unique_loras = []
+    for lora in detected_loras:
+        if lora not in seen_loras:
+            seen_loras.add(lora)
+            unique_loras.append(lora)
+            
+    # Link other LoRAs (excluding private Mercury ZI LoRAs)
+    for lora_name in unique_loras:
+        name_lower = lora_name.lower()
+        # Filter out local Mercury ZI LoRAs (case insensitive check for 'mercury' or 'zi')
+        if "mercury" in name_lower or "zi" in name_lower:
+            print(f"   [INFO] Skipping private/local LoRA: {lora_name}")
+            continue
+            
+        lora_version_id = None
+        if normalized_mapping:
+            norm_key = normalize_model_key(lora_name)
+            if norm_key in normalized_mapping:
+                lora_version_id = normalized_mapping[norm_key]
+                
+        resources.append({
+            "type": "lora",
+            "name": lora_name,
+            "modelVersionId": lora_version_id
+        })
+        if lora_version_id:
+            print(f"   [INFO] Linked LoRA: {lora_name} -> Civitai Version: {lora_version_id}")
+        else:
+            print(f"   [INFO] Detected LoRA (no mapping found): {lora_name}")
+            
+    if resources:
+        meta["resources"] = resources
     
     payload = {
         "json": {
@@ -445,7 +514,15 @@ def main():
                     print(f"   [{index+1}/{len(grp_images)}] Uploading {os.path.basename(img_path)} (Model: {model_name} -> Version: {model_version})")
                     
                     upload_id = upload_image(session, img_path)
-                    add_image_to_post(session, post_id, upload_id, img_path, index=index, model_version_id=model_version)
+                    add_image_to_post(
+                        session=session, 
+                        post_id=post_id, 
+                        upload_image_id=upload_id, 
+                        local_file=img_path, 
+                        index=index, 
+                        model_version_id=model_version,
+                        normalized_mapping=normalized_mapping
+                    )
                     
                 # Add tags
                 for tag in args.tags:
@@ -472,7 +549,15 @@ def main():
                 print(f"   [{index+1}/{len(valid_image_paths)}] Uploading {os.path.basename(img_path)} (Model: {model_name} -> Version: {model_version})")
                 
                 upload_id = upload_image(session, img_path)
-                add_image_to_post(session, post_id, upload_id, img_path, index=index, model_version_id=model_version)
+                add_image_to_post(
+                    session=session, 
+                    post_id=post_id, 
+                    upload_image_id=upload_id, 
+                    local_file=img_path, 
+                    index=index, 
+                    model_version_id=model_version,
+                    normalized_mapping=normalized_mapping
+                )
                 
             # Add tags
             for tag in args.tags:
