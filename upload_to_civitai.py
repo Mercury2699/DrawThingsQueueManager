@@ -56,6 +56,12 @@ def load_cookies_from_json(cookie_file):
             if '=' in item:
                 k, v = item.split('=', 1)
                 cookies[k.strip()] = v.strip()
+    # Automatically map session tokens between .com and .red for ease of use
+    if "__Secure-civitai-prod.session-token" in cookies and "__Secure-civitai-token" not in cookies:
+        cookies["__Secure-civitai-token"] = cookies["__Secure-civitai-prod.session-token"]
+    elif "__Secure-civitai-token" in cookies and "__Secure-civitai-prod.session-token" not in cookies:
+        cookies["__Secure-civitai-prod.session-token"] = cookies["__Secure-civitai-token"]
+        
     return cookies
 
 def verify_session(session):
@@ -96,21 +102,65 @@ def verify_session(session):
 def extract_metadata_from_png(local_file):
     try:
         img = Image.open(local_file)
-        # Check standard "parameters" chunk first
-        params_str = img.info.get("parameters")
+        
+        # Check standard info keys first
+        params_str = img.info.get("parameters") or img.info.get("Description")
+        meta = {}
+        
+        # If not found in standard keys, check in XMP (common for modern Draw Things versions)
         if not params_str:
-            # Check "Description" chunk (often used by Draw Things or other tools)
-            params_str = img.info.get("Description")
-            
+            xmp_data = img.info.get("xmp") or img.info.get("XML:com.adobe.xmp")
+            if xmp_data:
+                if isinstance(xmp_data, bytes):
+                    xmp_data = xmp_data.decode('utf-8', errors='ignore')
+                
+                # Try to extract from exif:UserComment which has JSON
+                user_comment_match = re.search(r'<exif:UserComment>.*?<rdf:li[^>]*>(.*?)</rdf:li>.*?</exif:UserComment>', xmp_data, re.DOTALL)
+                if user_comment_match:
+                    json_str = user_comment_match.group(1).strip()
+                    import html
+                    json_str = html.unescape(json_str)
+                    try:
+                        dt_meta = json.loads(json_str)
+                        if "c" in dt_meta:
+                            meta["prompt"] = dt_meta["c"]
+                        if "uc" in dt_meta:
+                            meta["negativePrompt"] = dt_meta["uc"]
+                        if "scale" in dt_meta:
+                            meta["cfgScale"] = float(dt_meta["scale"])
+                        if "steps" in dt_meta:
+                            meta["steps"] = int(dt_meta["steps"])
+                        if "sampler" in dt_meta:
+                            meta["sampler"] = dt_meta["sampler"]
+                        if "seed" in dt_meta:
+                            meta["seed"] = int(dt_meta["seed"])
+                        if "size" in dt_meta:
+                            meta["Size"] = dt_meta["size"]
+                        if "model" in dt_meta:
+                            meta["Model"] = dt_meta["model"]
+                        if "loras" in dt_meta:
+                            meta["detected_loras"] = [l.get("file") or l.get("model") for l in dt_meta["loras"] if l.get("file") or l.get("model")]
+                        elif "lora" in dt_meta:
+                            meta["detected_loras"] = [l.get("file") or l.get("model") for l in dt_meta["lora"] if l.get("file") or l.get("model")]
+                        return meta
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Fallback: Try to extract from dc:description
+                desc_match = re.search(r'<dc:description>.*?<rdf:li[^>]*>(.*?)</rdf:li>.*?</dc:description>', xmp_data, re.DOTALL)
+                if desc_match:
+                    desc_text = desc_match.group(1).strip()
+                    import html
+                    desc_text = html.unescape(desc_text)
+                    params_str = desc_text
+
         if not params_str:
             return {}
-            
-        # If the description chunk is JSON (e.g. Draw Things JSON metadata format)
+
+        # If it is JSON (e.g. Draw Things JSON metadata format)
         if params_str.strip().startswith("{") and params_str.strip().endswith("}"):
             try:
                 dt_meta = json.loads(params_str)
-                # Map Draw Things JSON fields to Civitai fields
-                meta = {}
                 if "prompt" in dt_meta:
                     meta["prompt"] = dt_meta["prompt"]
                 if "negative_prompt" in dt_meta:
@@ -127,11 +177,12 @@ def extract_metadata_from_png(local_file):
                     meta["Size"] = f"{dt_meta['width']}x{dt_meta['height']}"
                 if "model" in dt_meta:
                     meta["Model"] = dt_meta["model"]
+                if "loras" in dt_meta:
+                    meta["detected_loras"] = [l.get("file") or l.get("model") for l in dt_meta["loras"] if l.get("file") or l.get("model")]
                 return meta
             except json.JSONDecodeError:
                 pass
 
-        meta = {}
         # Parse standard SD WebUI text block
         parts = params_str.split("\n")
         prompt_lines = []
@@ -192,7 +243,7 @@ def upload_image(session, local_file):
     filename = os.path.basename(local_file)
     print(f"   Uploading S3 ticket for {filename}...")
     resp = session.post(
-        f"{CIVITAI_ROOT}/api/image-upload",
+        f"{CIVITAI_ROOT}/api/v1/image-upload",
         json={
             "filename": filename,
             "metadata": {}
@@ -251,20 +302,7 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
         })
         
     # Detect LoRAs
-    detected_loras = []
-    
-    # From Draw Things Description JSON metadata
-    desc = img.info.get("Description") or ""
-    if desc.strip().startswith("{") and desc.strip().endswith("}"):
-        try:
-            dt_meta = json.loads(desc)
-            dt_loras = dt_meta.get("loras", [])
-            for lora in dt_loras:
-                lora_file = lora.get("file")
-                if lora_file:
-                    detected_loras.append(lora_file)
-        except:
-            pass
+    detected_loras = meta.get("detected_loras", [])[:]
             
     # From prompt text tags <lora:name:weight>
     prompt = meta.get('prompt', '')

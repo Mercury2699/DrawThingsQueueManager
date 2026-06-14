@@ -19,3 +19,5 @@ outputs/*.png
 
 # macOS system files
 .DS_Store
+
+cookies.json
