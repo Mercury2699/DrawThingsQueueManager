@@ -15,6 +15,7 @@ import uuid
 import datetime
 import argparse
 import requests
+import glob
 from urllib.parse import urljoin
 from PIL import Image
 
@@ -115,6 +116,8 @@ def extract_metadata_from_png(local_file):
                     meta["seed"] = int(dt_meta["seed"])
                 if "width" in dt_meta and "height" in dt_meta:
                     meta["Size"] = f"{dt_meta['width']}x{dt_meta['height']}"
+                if "model" in dt_meta:
+                    meta["Model"] = dt_meta["model"]
                 return meta
             except json.JSONDecodeError:
                 pass
@@ -156,6 +159,8 @@ def extract_metadata_from_png(local_file):
                 meta['seed'] = int(param_dict['seed'])
             if 'size' in param_dict:
                 meta['Size'] = param_dict['size']
+            if 'model' in param_dict:
+                meta['Model'] = param_dict['model']
                 
         return meta
     except Exception as e:
@@ -176,7 +181,7 @@ def get_blurhash(local_file):
 
 def upload_image(session, local_file):
     filename = os.path.basename(local_file)
-    print(f"1. Requesting upload ticket for {filename}...")
+    print(f"   Uploading S3 ticket for {filename}...")
     resp = session.post(
         f"{CIVITAI_ROOT}/api/image-upload",
         json={
@@ -190,18 +195,14 @@ def upload_image(session, local_file):
     upload_id = ticket['id']
     upload_url = ticket['uploadURL']
     
-    print(f"2. Uploading file binary content ({os.path.getsize(local_file)} bytes) to S3...")
     with open(local_file, 'rb') as f:
-        # DO NOT use the session cookies or custom headers for S3 PUT
-        # as it will result in S3 SignatureDoesNotMatch error.
+        # DO NOT use session cookies or custom headers for S3 PUT
         put_resp = requests.put(upload_url, data=f)
         put_resp.raise_for_status()
         
-    print("3. Image file uploaded to S3 successfully.")
     return upload_id
 
 def create_post(session, model_version_id=None):
-    print("4. Creating new post draft...")
     payload = {
         "json": {
             "modelVersionId": model_version_id,
@@ -215,9 +216,9 @@ def create_post(session, model_version_id=None):
     resp.raise_for_status()
     res = resp.json()
     if 'error' in res:
-        raise Exception(f"Failed to create post: {res['error']}")
+        raise Exception(f"Failed to create post draft: {res['error']}")
     post_id = res['result']['data']['json']['id']
-    print(f"5. Created post draft (ID: {post_id})")
+    print(f"   Created draft post container (ID: {post_id})")
     return post_id
 
 def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, model_version_id=None):
@@ -228,7 +229,6 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
     bhash = get_blurhash(local_file)
     meta = extract_metadata_from_png(local_file)
     
-    print(f"6. Registering image {filename} to post draft...")
     payload = {
         "json": {
             "type": "image",
@@ -254,11 +254,9 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
     resp.raise_for_status()
     res = resp.json()
     if 'error' in res:
-        raise Exception(f"Failed to add image to post: {res['error']}")
-    print("7. Image successfully registered to post draft.")
+        raise Exception(f"Failed to associate image to post draft: {res['error']}")
 
 def add_tag_to_post(session, post_id, tag_name):
-    print(f"8. Adding tag '{tag_name}'...")
     payload = {
         "json": {
             "id": post_id,
@@ -276,7 +274,6 @@ def add_tag_to_post(session, post_id, tag_name):
         print(f"   [WARNING] Failed to add tag '{tag_name}': {res['error']['message']}")
 
 def publish_post(session, post_id, title=None, detail=None, nsfw=False):
-    print("9. Publishing post...")
     payload = {
         "json": {
             "id": post_id,
@@ -301,26 +298,77 @@ def publish_post(session, post_id, title=None, detail=None, nsfw=False):
         raise Exception(f"Failed to publish post: {res['error']}")
     
     post_url = f"{CIVITAI_ROOT}/posts/{post_id}"
-    print(f"\n🎉 SUCCESS! Post published successfully!")
-    print(f"👉 Link: {post_url}")
+    print(f"   ✅ Published! Link: {post_url}")
     return post_url
+
+def load_model_mapping(mapping_arg):
+    if not mapping_arg:
+        return {}
+    
+    # Try parsing as JSON string
+    try:
+        return json.loads(mapping_arg)
+    except json.JSONDecodeError:
+        pass
+        
+    # Try parsing as JSON file path
+    if os.path.exists(mapping_arg):
+        try:
+            with open(mapping_arg, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Warning: Failed to load model mapping file: {e}")
+            
+    return {}
+
+def normalize_model_key(key):
+    if not key:
+        return ""
+    key = os.path.basename(key)
+    for ext in ['.ckpt', '.safetensors', '.pt', '.png']:
+        if key.lower().endswith(ext):
+            key = key[:-len(ext)]
+    return key.lower().strip()
 
 def main():
     parser = argparse.ArgumentParser(description="Upload showcase images directly to Civitai.red")
-    parser.add_argument("--image", required=True, help="Path to local image file to upload")
+    parser.add_argument("--image", nargs="+", required=True, help="One or more paths to local image files or wildcards")
     parser.add_argument("--cookies", default="cookies.json", help="Path to cookies.json file (default: cookies.json)")
     parser.add_argument("--tags", nargs="*", default=[], help="Optional list of tags for the post")
-    parser.add_argument("--title", help="Optional title for the post")
+    parser.add_argument("--title", help="Optional title/title prefix for the post")
     parser.add_argument("--description", help="Optional description/detail markdown for the post")
     parser.add_argument("--nsfw", action="store_true", help="Flag the post as mature/NSFW")
-    parser.add_argument("--model-version", type=int, help="Optional model version ID to link the image to")
+    parser.add_argument("--model-version", nargs="*", type=int, help="Optional model version IDs to link the images to (ordered matching --image)")
+    parser.add_argument("--model-mapping", help="Path to JSON file mapping model filenames/hashes to Civitai version IDs, or raw JSON string")
+    parser.add_argument("--group-by-prompt", action="store_true", help="Automatically group images by their prompts and create one post per group")
     
     args = parser.parse_args()
     
-    if not os.path.exists(args.image):
-        print(f"Error: Image file not found: {args.image}")
+    # Expand wildcards manually
+    image_paths = []
+    for pattern in args.image:
+        matches = glob.glob(pattern)
+        if matches:
+            image_paths.extend(matches)
+        else:
+            image_paths.append(pattern)
+            
+    # Filter valid files
+    valid_image_paths = []
+    for p in image_paths:
+        if os.path.exists(p):
+            valid_image_paths.append(p)
+        else:
+            print(f"Warning: Image file not found: {p}")
+            
+    if not valid_image_paths:
+        print("Error: No valid images found to upload.")
         sys.exit(1)
         
+    # Load model mapping
+    model_mapping = load_model_mapping(args.model_mapping)
+    normalized_mapping = {normalize_model_key(k): v for k, v in model_mapping.items()}
+    
     try:
         cookies = load_cookies_from_json(args.cookies)
     except FileNotFoundError:
@@ -339,23 +387,100 @@ def main():
         print("Error: Could not verify session. Your cookies may have expired.")
         sys.exit(1)
         
+    def resolve_model_version_id(img_path, idx, meta):
+        # 1. Order match CLI argument list
+        if args.model_version:
+            if idx < len(args.model_version):
+                return args.model_version[idx]
+            else:
+                return args.model_version[0]
+                
+        # 2. Check model mapping
+        model_name = meta.get('Model')
+        if model_name:
+            norm_key = normalize_model_key(model_name)
+            if norm_key in normalized_mapping:
+                return normalized_mapping[norm_key]
+                
+        return None
+        
     try:
-        # Step 1: Upload image to S3
-        upload_id = upload_image(session, args.image)
-        
-        # Step 2: Create post draft
-        post_id = create_post(session, args.model_version)
-        
-        # Step 3: Add S3 image to post
-        add_image_to_post(session, post_id, upload_id, args.image, index=0, model_version_id=args.model_version)
-        
-        # Step 4: Add tags
-        for tag in args.tags:
-            add_tag_to_post(session, post_id, tag)
+        if args.group_by_prompt:
+            # 1. Group images by prompt
+            prompt_groups = {}
+            for idx, img_path in enumerate(valid_image_paths):
+                meta = extract_metadata_from_png(img_path)
+                prompt = meta.get('prompt', '').strip()
+                # Normalize prompt for grouping (collapse whitespace, lowercase)
+                normalized_prompt = re.sub(r'\s+', ' ', prompt.lower()).strip()
+                if not normalized_prompt:
+                    normalized_prompt = "__no_prompt__"
+                    
+                if normalized_prompt not in prompt_groups:
+                    prompt_groups[normalized_prompt] = {
+                        "prompt": prompt,
+                        "images": []
+                    }
+                prompt_groups[normalized_prompt]["images"].append((img_path, idx, meta))
+                
+            print(f"\n📂 Found {len(prompt_groups)} distinct prompt groups across {len(valid_image_paths)} images.")
             
-        # Step 5: Publish post
-        publish_post(session, post_id, title=args.title, detail=args.description, nsfw=args.nsfw)
-        
+            for p_key, group in prompt_groups.items():
+                prompt_text = group["prompt"]
+                grp_images = group["images"]
+                
+                display_prompt = prompt_text[:60] + "..." if len(prompt_text) > 60 else (prompt_text or "[No Prompt]")
+                print(f"\n📁 Processing group: '{display_prompt}' ({len(grp_images)} images)")
+                
+                # Use first image model version for the post draft container
+                first_img_path, first_idx, first_meta = grp_images[0]
+                first_model_version = resolve_model_version_id(first_img_path, first_idx, first_meta)
+                
+                post_id = create_post(session, first_model_version)
+                
+                # Upload and add all images in this prompt group
+                for index, (img_path, original_idx, meta) in enumerate(grp_images):
+                    model_version = resolve_model_version_id(img_path, original_idx, meta)
+                    model_name = meta.get('Model', 'Unknown Model')
+                    print(f"   [{index+1}/{len(grp_images)}] Uploading {os.path.basename(img_path)} (Model: {model_name} -> Version: {model_version})")
+                    
+                    upload_id = upload_image(session, img_path)
+                    add_image_to_post(session, post_id, upload_id, img_path, index=index, model_version_id=model_version)
+                    
+                # Add tags
+                for tag in args.tags:
+                    add_tag_to_post(session, post_id, tag)
+                    
+                # Publish post
+                title = args.title or (prompt_text[:100] if prompt_text else "Showcase Image Group")
+                publish_post(session, post_id, title=title, detail=args.description, nsfw=args.nsfw)
+                
+        else:
+            # 2. Upload all images into a single post container
+            print(f"\n📁 Uploading all {len(valid_image_paths)} images into a single Civitai post.")
+            
+            # Use first image model version for the post draft container
+            first_meta = extract_metadata_from_png(valid_image_paths[0])
+            first_model_version = resolve_model_version_id(valid_image_paths[0], 0, first_meta)
+            
+            post_id = create_post(session, first_model_version)
+            
+            for index, img_path in enumerate(valid_image_paths):
+                meta = extract_metadata_from_png(img_path) if index > 0 else first_meta
+                model_version = resolve_model_version_id(img_path, index, meta)
+                model_name = meta.get('Model', 'Unknown Model')
+                print(f"   [{index+1}/{len(valid_image_paths)}] Uploading {os.path.basename(img_path)} (Model: {model_name} -> Version: {model_version})")
+                
+                upload_id = upload_image(session, img_path)
+                add_image_to_post(session, post_id, upload_id, img_path, index=index, model_version_id=model_version)
+                
+            # Add tags
+            for tag in args.tags:
+                add_tag_to_post(session, post_id, tag)
+                
+            # Publish post
+            publish_post(session, post_id, title=args.title, detail=args.description, nsfw=args.nsfw)
+            
     except Exception as e:
         print(f"\n❌ Error during upload process: {e}")
         sys.exit(1)
