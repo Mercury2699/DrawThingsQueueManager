@@ -347,22 +347,70 @@ class QueueWorker:
         filename = f"dt_{int(time.time())}_{seed}.png"
         filepath = os.path.join(OUTPUT_DIR, filename)
 
+        # We will attempt the API call. If it fails (busy/empty/timeout), we wait 15 seconds and try once more.
+        attempts = 2
+        last_error = ""
+        response_data = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                print(f"  -> Sending API request (Attempt {attempt}/{attempts})...")
+                response = requests.post(
+                    api_endpoint, 
+                    json=payload, 
+                    headers={"Content-Type": "application/json"}, 
+                    timeout=1800  # 30 minutes timeout
+                )
+                
+                if response.status_code != 200:
+                    last_error = f"API error: HTTP {response.status_code} - {response.text[:200]}"
+                    print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
+                    if attempt < attempts:
+                        print("  Waiting 15 seconds to let GPU clear before retrying...")
+                        time.sleep(15)
+                    continue
+
+                data = response.json()
+                if "images" not in data or not data["images"]:
+                    last_error = f"API response contained no images. Response JSON: {json.dumps(data)[:200]}"
+                    print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
+                    if attempt < attempts:
+                        print("  Waiting 15 seconds to let GPU clear before retrying...")
+                        time.sleep(15)
+                    continue
+
+                # Success!
+                response_data = data
+                break
+
+            except requests.exceptions.Timeout:
+                last_error = "Timeout: Generation request took longer than 30 minutes."
+                print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
+                if attempt < attempts:
+                    print("  Waiting 15 seconds to let GPU clear before retrying...")
+                    time.sleep(15)
+            except requests.exceptions.ConnectionError:
+                last_error = "ConnectionError: Could not connect to Draw Things API. Is it running?"
+                print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
+                if attempt < attempts:
+                    print("  Waiting 15 seconds to let GPU clear before retrying...")
+                    time.sleep(15)
+            except Exception as e:
+                last_error = f"Exception: {str(e)}"
+                print(f"  [WARNING] Attempt {attempt} failed: {last_error}")
+                if attempt < attempts:
+                    print("  Waiting 15 seconds to let GPU clear before retrying...")
+                    time.sleep(15)
+
+        if not response_data:
+            # Both attempts failed
+            self.error_message = last_error
+            self._save_history_fail(queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, last_error)
+            return False
+
+        # Save base64 image to file
         try:
-            response = requests.post(api_endpoint, json=payload, headers={"Content-Type": "application/json"}, timeout=300)
-            
-            if response.status_code != 200:
-                err_msg = f"API error: HTTP {response.status_code} - {response.text[:200]}"
-                self._save_history_fail(queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, err_msg)
-                return False
-
-            data = response.json()
-            if "images" not in data or not data["images"]:
-                err_msg = "API response contained no images"
-                self._save_history_fail(queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, err_msg)
-                return False
-
-            # Save base64 image to file
-            img_data = base64.b64decode(data["images"][0])
+            img_data = base64.b64decode(response_data["images"][0])
             img = Image.open(BytesIO(img_data))
             img.save(filepath)
 
@@ -376,14 +424,8 @@ class QueueWorker:
             conn.commit()
             conn.close()
             return True
-
-        except requests.exceptions.ConnectionError:
-            err_msg = "ConnectionError: Could not connect to Draw Things API server. Is it running?"
-            self.error_message = err_msg
-            self._save_history_fail(queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, err_msg)
-            return False
         except Exception as e:
-            err_msg = f"Exception: {str(e)}"
+            err_msg = f"Failed to save image file: {str(e)}"
             self.error_message = err_msg
             self._save_history_fail(queue_id, prompt, model, seed, steps, cfg_scale, width, height, loras, err_msg)
             return False
