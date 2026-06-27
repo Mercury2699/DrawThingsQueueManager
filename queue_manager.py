@@ -582,6 +582,43 @@ def delete_queue_item(item_id: int):
     # If the deleted item was currently active, background worker will notice it's gone and skip it.
     return {"status": "success"}
 
+@app.put("/api/queue/{item_id}")
+def update_queue_item(item_id: int, item: QueueItemCreate):
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Check if item exists and status is pending
+    cursor.execute("SELECT status FROM queue WHERE id = ?", (item_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Queue item not found")
+        
+    if row["status"] != "pending":
+        conn.close()
+        raise HTTPException(status_code=400, detail="Only pending queue items can be edited")
+        
+    cursor.execute("""
+        UPDATE queue 
+        SET prompt = ?, negative_prompt = ?, models = ?, steps = ?, cfg_scale = ?, width = ?, height = ?, loras = ?, batch_count = ?, seed = ?
+        WHERE id = ? AND status = 'pending'
+    """, (
+        item.prompt,
+        item.negative_prompt,
+        json.dumps(item.models),
+        item.steps,
+        item.cfg_scale,
+        item.width,
+        item.height,
+        json.dumps([{"file": l.file, "weight": l.weight} for l in item.loras]),
+        item.batch_count,
+        item.seed,
+        item_id
+    ))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
 @app.post("/api/queue/reorder")
 def reorder_queue(req: ReorderRequest):
     conn = get_db()
