@@ -17,6 +17,16 @@ const API = {
         body: JSON.stringify(data)
     }).then(r => r.json()),
     deleteQueue: (id) => fetch(`/api/queue/${id}`, { method: 'DELETE' }).then(r => r.json()),
+    updateQueue: (id, data) => fetch(`/api/queue/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+    }).then(r => {
+        if (!r.ok) {
+            return r.json().then(err => { throw new Error(err.detail || 'Failed to update queue item'); });
+        }
+        return r.json();
+    }),
     reorderQueue: (items) => fetch('/api/queue/reorder', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -496,6 +506,11 @@ function renderQueue() {
                         <button class="btn-card-action" onclick="moveQueueItem(${item.id}, 'down')" title="Move Down" ${idx === state.queue.length - 1 ? 'disabled' : ''}>
                             <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
                         </button>
+                        ${item.status === 'pending' ? `
+                        <button class="btn-card-action btn-edit" onclick="openEditModal(${item.id})" title="Edit Task">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                        </button>
+                        ` : ''}
                         <button class="btn-card-action btn-delete" onclick="deleteQueueItem(${item.id})" title="Delete Task">
                             <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         </button>
@@ -916,6 +931,274 @@ function showToast(message, isError = false) {
 }
 
 // ==============================================================================
+// EDIT QUEUE ITEM SYSTEM
+// ==============================================================================
+let editSizeState = {
+    ratio: '1:1',
+    size: 1024
+};
+
+let currentEditingItemId = null;
+
+function updateEditDimensions() {
+    try {
+        let r = editSizeState.ratio || '1:1';
+        let s = editSizeState.size || 1024;
+        let w = s;
+        let h = s;
+        
+        let parts = r.split(':');
+        let x = parseInt(parts[0]);
+        let y = parseInt(parts[1]);
+        
+        if (x === y) {
+            w = s;
+            h = s;
+        } else if (x < y) { // Portrait
+            h = s;
+            w = s * x / y;
+            if (w < 512) {
+                w = 512;
+                h = 512 * y / x;
+            }
+        } else { // Landscape
+            w = s;
+            h = s * y / x;
+            if (h < 512) {
+                h = 512;
+                w = 512 * x / y;
+            }
+        }
+        
+        w = Math.round(w / 32) * 32;
+        h = Math.round(h / 32) * 32;
+        
+        w = Math.max(512, Math.min(2048, w));
+        h = Math.max(512, Math.min(2048, h));
+        
+        const widthInput = document.getElementById('edit-width');
+        const heightInput = document.getElementById('edit-height');
+        const displaySpan = document.getElementById('edit-size-value-display');
+        
+        if (widthInput) widthInput.value = w;
+        if (heightInput) heightInput.value = h;
+        if (displaySpan) displaySpan.innerText = `${s}px`;
+    } catch (e) {
+        console.error("Error updating edit dimensions:", e);
+    }
+}
+
+function setEditSizeStateFromDimensions(w, h) {
+    let q = w / h;
+    let size = Math.max(w, h);
+    let ratio = '1:1';
+    
+    if (Math.abs(q - 1.0) < 0.05) {
+        ratio = '1:1';
+    } else if (Math.abs(q - 0.666) < 0.05) {
+        ratio = '2:3';
+    } else if (Math.abs(q - 1.5) < 0.05) {
+        ratio = '3:2';
+    } else if (Math.abs(q - 0.75) < 0.05) {
+        ratio = '3:4';
+    } else if (Math.abs(q - 1.333) < 0.05) {
+        ratio = '4:3';
+    } else if (Math.abs(q - 0.562) < 0.05) {
+        ratio = '9:16';
+    } else if (Math.abs(q - 1.777) < 0.05) {
+        ratio = '16:9';
+    } else {
+        document.getElementById('edit-width').value = w;
+        document.getElementById('edit-height').value = h;
+        return;
+    }
+    
+    editSizeState.ratio = ratio;
+    editSizeState.size = size;
+    
+    // Update active class on ratio buttons inside edit modal
+    const ratioButtons = document.querySelectorAll('#edit-aspect-ratio-selector .btn-ratio');
+    ratioButtons.forEach(btn => {
+        if (btn.getAttribute('data-ratio') === ratio) btn.classList.add('active');
+        else btn.classList.remove('active');
+    });
+    
+    // Update slider value
+    const sizeSlider = document.getElementById('edit-size-slider');
+    if (sizeSlider) {
+        sizeSlider.value = size;
+    }
+    
+    updateEditDimensions();
+}
+
+function populateEditModelsAndLoras() {
+    const modelsContainer = document.getElementById('edit-models-list-container');
+    const lorasContainer = document.getElementById('edit-loras-list-container');
+    
+    // Render Models Checkboxes
+    if (state.models.length === 0) {
+        modelsContainer.innerHTML = '<div class="loading-inline">No models found in Draw Things folder.</div>';
+    } else {
+        modelsContainer.innerHTML = state.models.map((m) => `
+            <label class="model-checkbox-label">
+                <input type="checkbox" name="edit-model" value="${m}">
+                <span>${m}</span>
+            </label>
+        `).join('');
+    }
+
+    // Render LoRAs Checkboxes + Weight Sliders
+    if (state.loras.length === 0) {
+        lorasContainer.innerHTML = '<div class="loading-inline">No LoRAs found in Draw Things folder.</div>';
+    } else {
+        lorasContainer.innerHTML = state.loras.map((l) => `
+            <div class="lora-item-row" id="edit-lora-row-${cleanId(l)}">
+                <div class="lora-item-top">
+                    <label class="lora-checkbox-container">
+                        <input type="checkbox" name="edit-lora-enable" value="${l}" onchange="toggleEditLoraSlider('${cleanId(l)}')">
+                        <span>${l}</span>
+                    </label>
+                </div>
+                <div class="lora-weight-container">
+                    <input type="range" class="lora-weight-slider" id="edit-lora-weight-${cleanId(l)}" min="-2.0" max="2.0" step="0.05" value="1.0" oninput="updateEditLoraWeightVal('${cleanId(l)}')">
+                    <span class="lora-weight-value" id="edit-lora-val-${cleanId(l)}">1.0</span>
+                </div>
+            </div>
+        `).join('');
+    }
+}
+
+function toggleEditLoraSlider(cleanedId) {
+    const row = document.getElementById(`edit-lora-row-${cleanedId}`);
+    if (row) {
+        row.classList.toggle('active');
+    }
+}
+
+function updateEditLoraWeightVal(cleanedId) {
+    const slider = document.getElementById(`edit-lora-weight-${cleanedId}`);
+    const valSpan = document.getElementById(`edit-lora-val-${cleanedId}`);
+    if (slider && valSpan) {
+        valSpan.innerText = parseFloat(slider.value).toFixed(1);
+    }
+}
+
+function openEditModal(itemId) {
+    const item = state.queue.find(q => q.id === itemId);
+    if (!item) return;
+    
+    if (item.status !== 'pending') {
+        showToast("Only pending items can be edited!", true);
+        return;
+    }
+    
+    currentEditingItemId = itemId;
+    
+    // Populate form fields
+    document.getElementById('edit-prompt').value = item.prompt;
+    document.getElementById('edit-negative-prompt').value = item.negative_prompt || '';
+    document.getElementById('edit-steps').value = item.steps || 8;
+    document.getElementById('edit-cfg-scale').value = item.cfg_scale || 1.0;
+    document.getElementById('edit-batch-count').value = item.batch_count || 2;
+    document.getElementById('edit-seed').value = item.seed;
+    
+    // Dynamically populate models & loras lists for the edit modal
+    populateEditModelsAndLoras();
+    
+    // Check base models checkmarks
+    const modelCheckboxes = document.querySelectorAll('input[name="edit-model"]');
+    modelCheckboxes.forEach(cb => {
+        cb.checked = item.models.includes(cb.value);
+    });
+    
+    // Check and set LoRAs checkboxes & weight sliders
+    item.loras.forEach(savedLora => {
+        const cleaned = cleanId(savedLora.file);
+        const row = document.getElementById(`edit-lora-row-${cleaned}`);
+        if (row) {
+            const cb = row.querySelector('input[name="edit-lora-enable"]');
+            const slider = row.querySelector('.lora-weight-slider');
+            const valSpan = row.querySelector('.lora-weight-value');
+            
+            if (cb && slider) {
+                cb.checked = true;
+                row.classList.add('active');
+                slider.value = savedLora.weight;
+                if (valSpan) valSpan.innerText = parseFloat(savedLora.weight).toFixed(1);
+            }
+        }
+    });
+    
+    // Set aspect ratio and image size
+    setEditSizeStateFromDimensions(item.width, item.height);
+    
+    toggleModal('edit-modal', true);
+}
+
+async function saveQueueItemUpdate() {
+    if (!currentEditingItemId) return;
+    
+    const prompt = document.getElementById('edit-prompt').value.trim();
+    const negativePrompt = document.getElementById('edit-negative-prompt').value.trim();
+    const width = parseInt(document.getElementById('edit-width').value);
+    const height = parseInt(document.getElementById('edit-height').value);
+    const steps = parseInt(document.getElementById('edit-steps').value);
+    const cfgScale = parseFloat(document.getElementById('edit-cfg-scale').value);
+    const batchCount = parseInt(document.getElementById('edit-batch-count').value);
+    const seed = parseInt(document.getElementById('edit-seed').value);
+
+    // Selected Models
+    const modelCheckedElements = document.querySelectorAll('input[name="edit-model"]:checked');
+    const selectedModels = Array.from(modelCheckedElements).map(el => el.value);
+    
+    if (selectedModels.length === 0) {
+        showToast("Please select at least one Base Model!", true);
+        return;
+    }
+
+    // Selected LoRAs
+    const selectedLoras = [];
+    const loraRows = document.querySelectorAll('#edit-loras-list-container .lora-item-row.active');
+    loraRows.forEach(row => {
+        const checkbox = row.querySelector('input[name="edit-lora-enable"]');
+        const slider = row.querySelector('.lora-weight-slider');
+        if (checkbox && slider && checkbox.checked) {
+            selectedLoras.push({
+                file: checkbox.value,
+                weight: parseFloat(slider.value)
+            });
+        }
+    });
+
+    const updatedTaskData = {
+        prompt,
+        negative_prompt: negativePrompt,
+        models: selectedModels,
+        steps,
+        cfg_scale: cfgScale,
+        width,
+        height,
+        loras: selectedLoras,
+        batch_count: batchCount,
+        seed
+    };
+
+    try {
+        const res = await API.updateQueue(currentEditingItemId, updatedTaskData);
+        if (res.status === 'success') {
+            showToast("Queue item updated successfully!");
+            toggleModal('edit-modal', false);
+            await refreshQueue();
+        } else {
+            showToast("Failed to update queue item: " + (res.detail || "Unknown error"), true);
+        }
+    } catch (err) {
+        showToast("Failed to update queue item: " + err.message, true);
+    }
+}
+
+// ==============================================================================
 // EVENT LISTENERS
 // ==============================================================================
 function setupEventListeners() {
@@ -973,12 +1256,40 @@ function setupEventListeners() {
     
     // Image details close
     safeAddListener('btn-close-image', 'click', () => toggleModal('image-modal', false));
+
+    // Edit modal triggers
+    safeAddListener('btn-close-edit', 'click', () => toggleModal('edit-modal', false));
+    safeAddListener('btn-cancel-edit', 'click', () => toggleModal('edit-modal', false));
+    safeAddListener('btn-save-edit', 'click', saveQueueItemUpdate);
+
+    // Edit Size slider input
+    safeAddListener('edit-size-slider', 'input', (e) => {
+        editSizeState.size = parseInt(e.target.value);
+        updateEditDimensions();
+    });
+
+    // Edit ratio buttons
+    try {
+        const editRatioButtons = document.querySelectorAll('#edit-aspect-ratio-selector .btn-ratio');
+        editRatioButtons.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                editRatioButtons.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                editSizeState.ratio = btn.getAttribute('data-ratio');
+                updateEditDimensions();
+            });
+        });
+    } catch (err) {
+        console.error("Error setting up edit ratio buttons:", err);
+    }
     
     // Click outside to close modals
     window.addEventListener('click', (e) => {
         const settingsModal = document.getElementById('settings-modal');
         const imageModal = document.getElementById('image-modal');
+        const editModal = document.getElementById('edit-modal');
         if (e.target === settingsModal) toggleModal('settings-modal', false);
         if (e.target === imageModal) toggleModal('image-modal', false);
+        if (e.target === editModal) toggleModal('edit-modal', false);
     });
 }
