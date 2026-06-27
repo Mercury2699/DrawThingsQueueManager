@@ -16,15 +16,24 @@ import datetime
 import argparse
 import requests
 import glob
+import time
 from urllib.parse import urljoin
 from PIL import Image
 
 CIVITAI_ROOT = "https://civitai.red"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Referer": CIVITAI_ROOT,
+    "Origin": CIVITAI_ROOT,
     "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Ch-Ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="8"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"macOS"',
 }
 
 def load_cookies_from_json(cookie_file):
@@ -66,38 +75,81 @@ def load_cookies_from_json(cookie_file):
 
 def verify_session(session):
     print("Verifying session on Civitai.red...")
-    resp = session.get(CIVITAI_ROOT)
-    resp.raise_for_status()
     
-    # Search for __NEXT_DATA__
-    match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', resp.text)
-    if not match:
-        print("Warning: Could not find __NEXT_DATA__ in page source. Checking backup creator info endpoint...")
+    # Strategy 1: Try the API endpoint directly (avoids Cloudflare HTML page block)
+    api_endpoints = [
+        ("POST", f"{CIVITAI_ROOT}/api/trpc/user.getCreatorInfo", {"json": {}}),
+        ("GET", f"{CIVITAI_ROOT}/api/v1/models?limit=1", None),
+    ]
+    
+    for method, url, payload in api_endpoints:
         try:
-            r = session.post(
-                f"{CIVITAI_ROOT}/api/trpc/user.getCreatorInfo",
-                json={"json": {}}
-            )
+            if method == "POST":
+                r = session.post(url, json=payload, timeout=15)
+            else:
+                r = session.get(url, timeout=15)
+            
             if r.status_code == 200:
-                print("Session seems valid (API responded successfully).")
+                # Try to extract username from tRPC response
+                try:
+                    data = r.json()
+                    # tRPC user.getCreatorInfo response
+                    user_data = data.get('result', {}).get('data', {}).get('json', {})
+                    username = user_data.get('username')
+                    if username:
+                        print(f"✅ Success! Logged in as: {username}")
+                        return True
+                except:
+                    pass
+                print(f"✅ Session valid (API endpoint {url.split('/')[-1]} responded OK).")
                 return True
-        except:
-            pass
-        return False
-        
+            elif r.status_code == 401:
+                print(f"❌ Error: API returned 401 Unauthorized. Your cookies have expired.")
+                print("   Please re-export your cookies from your browser and update cookies.json.")
+                return False
+            elif r.status_code == 403:
+                print(f"   API endpoint {url.split('/')[-1]} returned 403, trying next...")
+                continue
+            else:
+                print(f"   API endpoint {url.split('/')[-1]} returned {r.status_code}, trying next...")
+                continue
+        except requests.exceptions.RequestException as e:
+            print(f"   API endpoint {url.split('/')[-1]} error: {e}, trying next...")
+            continue
+    
+    # Strategy 2: Fall back to fetching the HTML page (may be blocked by Cloudflare)
     try:
-        page_data = json.loads(match.group(1))
-        session_data = page_data.get("props", {}).get("pageProps", {}).get("session", {})
-        if session_data and "user" in session_data:
-            user = session_data["user"]
-            print(f"✅ Success! Logged in as: {user.get('username')} (ID: {user.get('id')}, Email: {user.get('email')})")
-            return True
-        else:
-            print("❌ Error: No active session found. Please make sure your cookies are up to date.")
+        print("   Trying HTML page verification (may be blocked by Cloudflare)...")
+        page_headers = dict(session.headers)
+        page_headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        page_headers['Sec-Fetch-Dest'] = 'document'
+        page_headers['Sec-Fetch-Mode'] = 'navigate'
+        page_headers['Sec-Fetch-Site'] = 'none'
+        resp = session.get(CIVITAI_ROOT, headers=page_headers, timeout=15)
+        if resp.status_code == 403:
+            print("❌ Error: Cloudflare is blocking direct access (403 Forbidden).")
+            print("   Your cookies may have expired, or you need to add the cf_clearance cookie.")
+            print("   Steps to fix:")
+            print("   1. Open civitai.red in your browser and make sure you're logged in")
+            print("   2. Re-export ALL cookies (including cf_clearance) using a browser extension")
+            print("   3. Save them to cookies.json and try again")
             return False
-    except Exception as e:
-        print(f"❌ Failed to parse session data: {e}")
-        return False
+        resp.raise_for_status()
+        
+        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', resp.text)
+        if match:
+            page_data = json.loads(match.group(1))
+            session_data = page_data.get("props", {}).get("pageProps", {}).get("session", {})
+            if session_data and "user" in session_data:
+                user = session_data["user"]
+                print(f"✅ Success! Logged in as: {user.get('username')} (ID: {user.get('id')}, Email: {user.get('email')})")
+                return True
+    except requests.exceptions.RequestException as e:
+        print(f"   HTML page verification failed: {e}")
+    
+    print("❌ Error: Could not verify session through any method.")
+    print("   Please make sure your cookies.json is up to date.")
+    return False
 
 def extract_metadata_from_png(local_file):
     try:
@@ -239,10 +291,47 @@ def get_blurhash(local_file):
         # Return a valid fallback gray-rect blurhash if package is missing or fails
         return "L6PZ|aJ-0y~w.w_N_4ob_4-;_4W["
 
+def post_with_retry(session, url, **kwargs):
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            resp = session.post(url, **kwargs)
+            if resp.status_code >= 500 or resp.status_code == 408:
+                wait_time = 2 ** attempt + 2
+                print(f"   [WARNING] Server error {resp.status_code} on POST {url}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            return resp
+        except (requests.exceptions.RequestException, Exception) as e:
+            if attempt == max_retries - 1:
+                raise
+            wait_time = 2 ** attempt + 2
+            print(f"   [WARNING] Network error {e} on POST {url}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+            time.sleep(wait_time)
+
+def put_with_retry(url, data, **kwargs):
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            resp = requests.put(url, data=data, **kwargs)
+            if resp.status_code >= 500 or resp.status_code == 408:
+                wait_time = 2 ** attempt + 2
+                print(f"   [WARNING] Server error {resp.status_code} on PUT. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            return resp
+        except (requests.exceptions.RequestException, Exception) as e:
+            if attempt == max_retries - 1:
+                raise
+            wait_time = 2 ** attempt + 2
+            print(f"   [WARNING] Network error {e} on PUT. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+            time.sleep(wait_time)
+
 def upload_image(session, local_file):
     filename = os.path.basename(local_file)
     print(f"   Uploading S3 ticket for {filename}...")
-    resp = session.post(
+    resp = post_with_retry(
+        session,
         f"{CIVITAI_ROOT}/api/v1/image-upload",
         json={
             "filename": filename,
@@ -257,7 +346,7 @@ def upload_image(session, local_file):
     
     with open(local_file, 'rb') as f:
         # DO NOT use session cookies or custom headers for S3 PUT
-        put_resp = requests.put(upload_url, data=f)
+        put_resp = put_with_retry(upload_url, data=f)
         put_resp.raise_for_status()
         
     return upload_id
@@ -269,7 +358,8 @@ def create_post(session, model_version_id=None):
             "authed": True
         }
     }
-    resp = session.post(
+    resp = post_with_retry(
+        session,
         f"{CIVITAI_ROOT}/api/trpc/post.create",
         json=payload
     )
@@ -289,8 +379,9 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
     bhash = get_blurhash(local_file)
     meta = extract_metadata_from_png(local_file)
     
-    # 1. Build resources list
+    # 1. Build resources list for UI and database detection
     resources = []
+    civitai_resources = []
     
     # Add base model resource
     base_model_name = meta.get('Model')
@@ -300,6 +391,11 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
             "name": base_model_name,
             "modelVersionId": model_version_id
         })
+        if model_version_id:
+            civitai_resources.append({
+                "modelVersionId": int(model_version_id),
+                "type": "checkpoint"
+            })
         
     # Detect LoRAs
     detected_loras = meta.get("detected_loras", [])[:]
@@ -318,32 +414,42 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
             seen_loras.add(lora)
             unique_loras.append(lora)
             
-    # Link other LoRAs (excluding private Mercury ZI LoRAs)
+    # Link LoRAs — any LoRA not in model_mapping.json will upload without attribution
     for lora_name in unique_loras:
-        name_lower = lora_name.lower()
-        # Filter out local Mercury ZI LoRAs (case insensitive check for 'mercury' or 'zi')
-        if "mercury" in name_lower or "zi" in name_lower:
-            print(f"   [INFO] Skipping private/local LoRA: {lora_name}")
-            continue
-            
         lora_version_id = None
         if normalized_mapping:
             norm_key = normalize_model_key(lora_name)
-            if norm_key in normalized_mapping:
-                lora_version_id = normalized_mapping[norm_key]
+            lora_version_id = lookup_model_version(norm_key, normalized_mapping)
                 
         resources.append({
             "type": "lora",
             "name": lora_name,
             "modelVersionId": lora_version_id
         })
+        
+        # Extract weight from prompt for civitaiResources if available
+        weight = 1.0
+        weight_match = re.search(rf'<lora:{re.escape(lora_name)}:([^>]+)>', prompt)
+        if weight_match:
+            try:
+                weight = float(weight_match.group(1))
+            except ValueError:
+                pass
+                
         if lora_version_id:
+            civitai_resources.append({
+                "modelVersionId": int(lora_version_id),
+                "type": "lora",
+                "weight": weight
+            })
             print(f"   [INFO] Linked LoRA: {lora_name} -> Civitai Version: {lora_version_id}")
         else:
             print(f"   [INFO] Detected LoRA (no mapping found): {lora_name}")
             
     if resources:
         meta["resources"] = resources
+    if civitai_resources:
+        meta["civitaiResources"] = civitai_resources
     
     payload = {
         "json": {
@@ -363,7 +469,8 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
             "authed": True
         }
     }
-    resp = session.post(
+    resp = post_with_retry(
+        session,
         f"{CIVITAI_ROOT}/api/trpc/post.addImage",
         json=payload
     )
@@ -380,7 +487,8 @@ def add_tag_to_post(session, post_id, tag_name):
             "authed": True
         }
     }
-    resp = session.post(
+    resp = post_with_retry(
+        session,
         f"{CIVITAI_ROOT}/api/trpc/post.addTag",
         json=payload
     )
@@ -404,7 +512,8 @@ def publish_post(session, post_id, title=None, detail=None, nsfw=False):
             }
         }
     }
-    resp = session.post(
+    resp = post_with_retry(
+        session,
         f"{CIVITAI_ROOT}/api/trpc/post.update",
         json=payload
     )
@@ -444,7 +553,46 @@ def normalize_model_key(key):
     for ext in ['.ckpt', '.safetensors', '.pt', '.png']:
         if key.lower().endswith(ext):
             key = key[:-len(ext)]
-    return key.lower().strip()
+    key = key.lower().replace('-', '_').replace(' ', '_')
+    key = re.sub(r'_+', '_', key)
+    return key.strip('_').strip()
+
+def lookup_model_version(norm_key, normalized_mapping):
+    """Look up a model version ID from the mapping using exact match first,
+    then prefix matching (longest matching prefix wins).
+    
+    This handles quantized variants like _q8p, _f16 that share the same
+    base model name without requiring separate entries in model_mapping.json.
+    
+    Examples:
+      'moody_pro_mix_v13_q8p' -> matches 'moody_pro_mix_v13' prefix
+      'z_image_turbo_1_0_q8p' -> matches 'z_image_turbo_1_0' prefix
+    """
+    if not norm_key:
+        return None
+    
+    # 1. Exact match
+    if norm_key in normalized_mapping:
+        return normalized_mapping[norm_key]
+    
+    # 2. Prefix match: find all mapping keys that are a prefix of norm_key,
+    #    pick the longest one (most specific).
+    best_key = None
+    best_len = 0
+    for map_key in normalized_mapping:
+        # The map_key must be a prefix of norm_key, and the character
+        # immediately after must be '_' (word boundary) to avoid false matches.
+        if norm_key.startswith(map_key):
+            rest = norm_key[len(map_key):]
+            if rest == '' or rest.startswith('_'):
+                if len(map_key) > best_len:
+                    best_key = map_key
+                    best_len = len(map_key)
+    
+    if best_key is not None:
+        return normalized_mapping[best_key]
+    
+    return None
 
 def main():
     parser = argparse.ArgumentParser(description="Upload showcase images directly to Civitai.red")
@@ -511,12 +659,15 @@ def main():
             else:
                 return args.model_version[0]
                 
-        # 2. Check model mapping
+        # 2. Check model mapping (exact then prefix)
         model_name = meta.get('Model')
         if model_name:
             norm_key = normalize_model_key(model_name)
-            if norm_key in normalized_mapping:
-                return normalized_mapping[norm_key]
+            version_id = lookup_model_version(norm_key, normalized_mapping)
+            if version_id is not None:
+                return version_id
+            else:
+                print(f"   [INFO] No mapping found for model '{model_name}' (normalized: '{norm_key}')")
                 
         return None
         
