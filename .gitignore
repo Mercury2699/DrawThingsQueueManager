@@ -21,3 +21,7 @@ outputs/*.png
 .DS_Store
 
 cookies.json
+
+# Local model mapping (personalised per-user, not for repo)
+model_mapping.json
+
