@@ -303,6 +303,8 @@ async function loadSettings() {
     try {
         state.settings = await API.getSettings();
         document.getElementById('setting-api-url').value = state.settings.draw_things_api || '';
+        document.getElementById('setting-civitai-cookies').value = state.settings.civitai_cookies || '';
+        document.getElementById('setting-civitai-mapping').value = state.settings.civitai_model_mapping || '';
     } catch (e) {
         console.error("Failed to load settings:", e);
     }
@@ -312,8 +314,15 @@ async function saveSettings() {
     const apiUrl = document.getElementById('setting-api-url').value.trim();
     if (!apiUrl) return;
     
+    const civitaiCookies = document.getElementById('setting-civitai-cookies').value.trim();
+    const civitaiMapping = document.getElementById('setting-civitai-mapping').value.trim();
+    
     try {
-        await API.saveSettings({ draw_things_api: apiUrl });
+        await API.saveSettings({
+            draw_things_api: apiUrl,
+            civitai_cookies: civitaiCookies,
+            civitai_model_mapping: civitaiMapping,
+        });
         state.settings.draw_things_api = apiUrl;
         toggleModal('settings-modal', false);
         showToast("Settings saved successfully!");
@@ -450,7 +459,8 @@ async function handleTaskFormSubmit(e) {
         height,
         loras: selectedLoras,
         batch_count: batchCount,
-        seed
+        seed,
+        auto_upload: document.getElementById('auto-upload')?.checked || false
     };
 
     try {
@@ -495,6 +505,18 @@ function renderQueue() {
         
         const lorasList = item.loras.map(l => `${l.file.split('_lora_')[0]} (${l.weight})`).join(', ') || 'None';
         
+        // Upload status badge
+        let uploadBadge = '';
+        if (item.upload_status === 'uploading') {
+            uploadBadge = '<span class="badge badge-uploading">↑ Uploading…</span>';
+        } else if (item.upload_status === 'uploaded') {
+            uploadBadge = '<span class="badge badge-uploaded">✓ Uploaded</span>';
+        } else if (item.upload_status === 'upload_failed') {
+            uploadBadge = '<span class="badge badge-upload-failed">✗ Upload failed</span>';
+        } else if (item.auto_upload) {
+            uploadBadge = '<span class="badge badge-auto-upload">⬆ Auto-upload</span>';
+        }
+        
         return `
             <div class="${cardClass}" draggable="true" data-id="${item.id}" ondragstart="handleDragStart(event)" ondragover="handleDragOver(event)" ondrop="handleDrop(event)" ondragend="handleDragEnd(event)">
                 <div class="queue-item-top">
@@ -525,6 +547,7 @@ function renderQueue() {
                         <span>Size: ${item.width}x${item.height}</span>
                         <span>Batch: ${item.batch_count}</span>
                         <span class="badge badge-${item.status}">${item.status}</span>
+                        ${uploadBadge}
                     </div>
                 </div>
             </div>
@@ -830,13 +853,20 @@ function openImageDetails(historyId) {
         toggleModal('image-modal', false);
     };
     
-    // File Link
+    // File Link (only shown when file exists locally, hidden if uploaded to civitai)
     const btnOpenFolder = document.getElementById('btn-modal-open-folder');
-    if (item.status === 'success') {
+    const btnCivitai = document.getElementById('btn-modal-civitai');
+    if (item.civitai_url) {
+        btnCivitai.href = item.civitai_url;
+        btnCivitai.classList.remove('hidden');
+        btnOpenFolder.classList.add('hidden');
+    } else if (item.status === 'success' && item.filename) {
         btnOpenFolder.href = `/outputs/${item.filename}`;
         btnOpenFolder.classList.remove('hidden');
+        btnCivitai.classList.add('hidden');
     } else {
         btnOpenFolder.classList.add('hidden');
+        btnCivitai.classList.add('hidden');
     }
     
     toggleModal('image-modal', true);

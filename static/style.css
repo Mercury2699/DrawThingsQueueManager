@@ -708,6 +708,67 @@ textarea:focus, input[type="text"]:focus, input[type="number"]:focus, select:foc
 .badge-failed { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); border: 1px solid rgba(239, 68, 68, 0.2); }
 .badge-info { background: rgba(99, 102, 241, 0.15); color: #818cf8; }
 
+/* Upload status badges */
+.badge-auto-upload { background: rgba(251, 191, 36, 0.1); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.2); }
+.badge-uploading {
+    background: rgba(59, 130, 246, 0.15); color: #60a5fa;
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    animation: pulse-badge 1.5s ease-in-out infinite;
+}
+.badge-uploaded { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+.badge-upload-failed { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.2); }
+
+@keyframes pulse-badge {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Toggle switch (auto-upload checkbox) */
+.auto-upload-group { margin-top: 4px; }
+.toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-secondary);
+    user-select: none;
+}
+.toggle-checkbox { display: none; }
+.toggle-switch {
+    flex-shrink: 0;
+    width: 36px; height: 20px;
+    background: rgba(255,255,255,0.08);
+    border-radius: 10px;
+    position: relative;
+    transition: background 0.2s;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+.toggle-switch::after {
+    content: '';
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    transition: transform 0.2s, background 0.2s;
+}
+.toggle-checkbox:checked + .toggle-switch { background: rgba(16, 185, 129, 0.35); border-color: rgba(16, 185, 129, 0.4); }
+.toggle-checkbox:checked + .toggle-switch::after { transform: translateX(16px); background: var(--accent-green); }
+
+/* CivitAI link button */
+.btn-civitai {
+    background: rgba(30, 100, 255, 0.15);
+    color: #7ca8ff;
+    border: 1px solid rgba(30, 100, 255, 0.25);
+    text-decoration: none;
+}
+.btn-civitai:hover { background: rgba(30, 100, 255, 0.25); color: #a5c0ff; }
+
+/* Settings divider */
+.settings-divider { border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 16px 0 12px; }
+.settings-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 10px; }
+
 .loading-state, .empty-state {
     text-align: center;
     color: var(--text-muted);

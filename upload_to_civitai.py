@@ -605,8 +605,12 @@ def main():
     parser.add_argument("--model-version", nargs="*", type=int, help="Optional model version IDs to link the images to (ordered matching --image)")
     parser.add_argument("--model-mapping", help="Path to JSON file mapping model filenames/hashes to Civitai version IDs, or raw JSON string")
     parser.add_argument("--group-by-prompt", action="store_true", help="Automatically group images by their prompts and create one post per group")
+    parser.add_argument("--output-json", action="store_true", help="Print a machine-readable UPLOAD_RESULT_JSON line mapping local filepaths to published post URLs")
     
     args = parser.parse_args()
+    
+    # Dict mapping absolute local filepath -> civitai post URL (populated as posts are published)
+    upload_result: dict = {}
     
     # Expand wildcards manually
     image_paths = []
@@ -736,7 +740,12 @@ def main():
                     
                 # Publish post
                 title = args.title or (prompt_text[:100] if prompt_text else "Showcase Image Group")
-                publish_post(session, post_id, title=title, detail=args.description, nsfw=args.nsfw)
+                post_url = publish_post(session, post_id, title=title, detail=args.description, nsfw=args.nsfw)
+                
+                # Record filepath -> post_url mapping for --output-json
+                if post_url:
+                    for img_path, _, _ in grp_images:
+                        upload_result[os.path.abspath(img_path)] = post_url
                 
         else:
             # 2. Upload all images into a single post container
@@ -770,11 +779,20 @@ def main():
                 add_tag_to_post(session, post_id, tag)
                 
             # Publish post
-            publish_post(session, post_id, title=args.title, detail=args.description, nsfw=args.nsfw)
+            post_url = publish_post(session, post_id, title=args.title, detail=args.description, nsfw=args.nsfw)
+            
+            # Record filepath -> post_url mapping for --output-json
+            if post_url:
+                for img_path in valid_image_paths:
+                    upload_result[os.path.abspath(img_path)] = post_url
             
     except Exception as e:
         print(f"\n❌ Error during upload process: {e}")
         sys.exit(1)
+    
+    # Emit machine-readable result for the queue manager to parse
+    if args.output_json and upload_result:
+        print(f"UPLOAD_RESULT_JSON:{json.dumps(upload_result)}")
 
 if __name__ == "__main__":
     main()

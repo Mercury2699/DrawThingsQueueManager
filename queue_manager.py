@@ -71,7 +71,9 @@ def init_db():
             seed INTEGER DEFAULT -1,
             status TEXT DEFAULT 'pending', -- pending, processing, completed, failed
             priority INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            auto_upload INTEGER DEFAULT 0,
+            upload_status TEXT DEFAULT NULL -- NULL, uploading, uploaded, upload_failed
         )
     """)
     
@@ -96,11 +98,18 @@ def init_db():
         )
     """)
     
-    # Ensure negative_prompt column exists in history table (migration)
-    try:
-        cursor.execute("ALTER TABLE history ADD COLUMN negative_prompt TEXT")
-    except sqlite3.OperationalError:
-        pass
+    # Migrations: add new columns if they don't exist yet
+    migrations = [
+        "ALTER TABLE history ADD COLUMN negative_prompt TEXT",
+        "ALTER TABLE history ADD COLUMN civitai_url TEXT",
+        "ALTER TABLE queue ADD COLUMN auto_upload INTEGER DEFAULT 0",
+        "ALTER TABLE queue ADD COLUMN upload_status TEXT DEFAULT NULL",
+    ]
+    for sql in migrations:
+        try:
+            cursor.execute(sql)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     
     # Settings table
     cursor.execute("""
@@ -112,6 +121,8 @@ def init_db():
     
     # Insert default settings if not exists
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('draw_things_api', ?)", (API_URL,))
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('civitai_cookies', '')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('civitai_model_mapping', '')")
     
     conn.commit()
     conn.close()
@@ -136,6 +147,7 @@ class QueueItemCreate(BaseModel):
     loras: Optional[List[LoraConfig]] = []
     batch_count: Optional[int] = 1
     seed: Optional[int] = -1
+    auto_upload: Optional[bool] = False
 
 class ControlAction(BaseModel):
     action: str # start, pause, clear_completed, clear_all
@@ -323,6 +335,25 @@ class QueueWorker:
             conn.commit()
             conn.close()
             
+            # Auto-upload: if enabled and at least one image succeeded, trigger background upload
+            if item['auto_upload'] and success_count > 0:
+                conn = get_db()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT filename FROM history WHERE queue_id = ? AND status = 'success' AND filename IS NOT NULL",
+                    (item_id,)
+                )
+                rows = cursor.fetchall()
+                conn.close()
+                filepaths = [os.path.join(OUTPUT_DIR, r['filename']) for r in rows]
+                if filepaths:
+                    upload_thread = threading.Thread(
+                        target=self._upload_completed_task,
+                        args=(item_id, filepaths),
+                        daemon=True
+                    )
+                    upload_thread.start()
+            
             time.sleep(0.5)
             self.current_task = None
             time.sleep(0.5)
@@ -433,6 +464,110 @@ class QueueWorker:
             self._save_history_fail(queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, err_msg)
             return False
 
+    def _upload_completed_task(self, queue_id: int, filepaths: list):
+        """Run upload_to_civitai.py as a subprocess for the given files.
+        Parses the UPLOAD_RESULT_JSON output, stores civitai_url in history,
+        then deletes the local PNG files to free disk space."""
+        import subprocess
+        
+        # Read upload config from settings
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM settings WHERE key IN ('civitai_cookies', 'civitai_model_mapping')")
+        settings_rows = {r['key']: r['value'] for r in cursor.fetchall()}
+        conn.close()
+        
+        cookies_path = settings_rows.get('civitai_cookies', '').strip()
+        mapping_path = settings_rows.get('civitai_model_mapping', '').strip()
+        
+        if not cookies_path or not os.path.exists(cookies_path):
+            print(f"[AUTO-UPLOAD] Skipping queue {queue_id}: civitai_cookies not configured or file missing ({cookies_path!r})")
+            conn = get_db()
+            conn.execute("UPDATE queue SET upload_status = 'upload_failed' WHERE id = ?", (queue_id,))
+            conn.commit(); conn.close()
+            return
+        
+        # Mark as uploading
+        conn = get_db()
+        conn.execute("UPDATE queue SET upload_status = 'uploading' WHERE id = ?", (queue_id,))
+        conn.commit(); conn.close()
+        
+        upload_script = os.path.join(BASE_DIR, 'upload_to_civitai.py')
+        cmd = [
+            'uv', 'run',
+            '--with', 'requests',
+            '--with', 'pillow',
+            '--with', 'blurhash-python',
+            upload_script,
+            '--cookies', cookies_path,
+            '--group-by-prompt',
+            '--output-json',
+            '--image', *filepaths,
+        ]
+        if mapping_path and os.path.exists(mapping_path):
+            cmd += ['--model-mapping', mapping_path]
+        
+        print(f"[AUTO-UPLOAD] Starting upload for queue {queue_id} ({len(filepaths)} files)...")
+        
+        upload_result = {}
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=3600  # 1 hour max
+            )
+            # Print subprocess output to console
+            for line in proc.stdout.splitlines():
+                print(f"[AUTO-UPLOAD] {line}")
+                # Parse the machine-readable result line
+                if line.startswith('UPLOAD_RESULT_JSON:'):
+                    try:
+                        upload_result = json.loads(line[len('UPLOAD_RESULT_JSON:'):])
+                    except json.JSONDecodeError as e:
+                        print(f"[AUTO-UPLOAD] Failed to parse result JSON: {e}")
+            if proc.returncode != 0:
+                print(f"[AUTO-UPLOAD] Upload script exited with code {proc.returncode}")
+                for line in proc.stderr.splitlines():
+                    print(f"[AUTO-UPLOAD] STDERR: {line}")
+        except subprocess.TimeoutExpired:
+            print(f"[AUTO-UPLOAD] Upload timed out for queue {queue_id}")
+        except Exception as e:
+            print(f"[AUTO-UPLOAD] Error running upload script: {e}")
+        
+        if not upload_result:
+            conn = get_db()
+            conn.execute("UPDATE queue SET upload_status = 'upload_failed' WHERE id = ?", (queue_id,))
+            conn.commit(); conn.close()
+            return
+        
+        # Store civitai_url in history rows and delete local files
+        deleted_count = 0
+        conn = get_db()
+        cursor = conn.cursor()
+        for abs_path, post_url in upload_result.items():
+            filename = os.path.basename(abs_path)
+            cursor.execute(
+                "UPDATE history SET civitai_url = ? WHERE queue_id = ? AND filename = ?",
+                (post_url, queue_id, filename)
+            )
+            # Delete the local file now that it's safely on CivitAI
+            try:
+                if os.path.exists(abs_path):
+                    os.remove(abs_path)
+                    deleted_count += 1
+            except OSError as e:
+                print(f"[AUTO-UPLOAD] Could not delete {abs_path}: {e}")
+        conn.commit()
+        conn.close()
+        
+        # Mark upload complete
+        conn = get_db()
+        conn.execute("UPDATE queue SET upload_status = 'uploaded' WHERE id = ?", (queue_id,))
+        conn.commit(); conn.close()
+        
+        print(f"[AUTO-UPLOAD] Done for queue {queue_id}: {len(upload_result)} posts published, {deleted_count} local files deleted.")
+
     def _save_history_fail(self, queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, error_message):
         try:
             conn = get_db()
@@ -531,7 +666,9 @@ def get_queue():
             "seed": r["seed"],
             "status": r["status"],
             "priority": r["priority"],
-            "created_at": r["created_at"]
+            "created_at": r["created_at"],
+            "auto_upload": bool(r["auto_upload"]),
+            "upload_status": r["upload_status"],
         })
     return result
 
@@ -546,8 +683,8 @@ def add_to_queue(item: QueueItemCreate):
     next_priority = (row["max_p"] or 0) + 1
     
     cursor.execute("""
-        INSERT INTO queue (prompt, negative_prompt, models, steps, cfg_scale, width, height, loras, batch_count, seed, status, priority)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        INSERT INTO queue (prompt, negative_prompt, models, steps, cfg_scale, width, height, loras, batch_count, seed, status, priority, auto_upload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
     """, (
         item.prompt,
         item.negative_prompt,
@@ -559,7 +696,8 @@ def add_to_queue(item: QueueItemCreate):
         json.dumps([{"file": l.file, "weight": l.weight} for l in item.loras]),
         item.batch_count,
         item.seed,
-        next_priority
+        next_priority,
+        1 if item.auto_upload else 0
     ))
     conn.commit()
     item_id = cursor.lastrowid
@@ -600,7 +738,7 @@ def update_queue_item(item_id: int, item: QueueItemCreate):
         
     cursor.execute("""
         UPDATE queue 
-        SET prompt = ?, negative_prompt = ?, models = ?, steps = ?, cfg_scale = ?, width = ?, height = ?, loras = ?, batch_count = ?, seed = ?
+        SET prompt = ?, negative_prompt = ?, models = ?, steps = ?, cfg_scale = ?, width = ?, height = ?, loras = ?, batch_count = ?, seed = ?, auto_upload = ?
         WHERE id = ? AND status = 'pending'
     """, (
         item.prompt,
@@ -613,6 +751,7 @@ def update_queue_item(item_id: int, item: QueueItemCreate):
         json.dumps([{"file": l.file, "weight": l.weight} for l in item.loras]),
         item.batch_count,
         item.seed,
+        1 if item.auto_upload else 0,
         item_id
     ))
     conn.commit()
@@ -715,6 +854,7 @@ def get_history(limit: int = 50, offset: int = 0):
             "filename": r["filename"],
             "status": r["status"],
             "error_message": r["error_message"],
+            "civitai_url": r["civitai_url"] if "civitai_url" in r.keys() else None,
             "created_at": r["created_at"]
         })
     return result
@@ -745,4 +885,4 @@ if __name__ == "__main__":
     worker.start()
     
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
