@@ -73,7 +73,9 @@ def init_db():
             priority INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             auto_upload INTEGER DEFAULT 0,
-            upload_status TEXT DEFAULT NULL -- NULL, uploading, uploaded, upload_failed
+            upload_status TEXT DEFAULT NULL, -- NULL, uploading, uploaded, upload_failed
+            init_image TEXT DEFAULT NULL,   -- base64-encoded reference image for i2i
+            denoising_strength REAL DEFAULT 0.6
         )
     """)
     
@@ -104,6 +106,8 @@ def init_db():
         "ALTER TABLE history ADD COLUMN civitai_url TEXT",
         "ALTER TABLE queue ADD COLUMN auto_upload INTEGER DEFAULT 0",
         "ALTER TABLE queue ADD COLUMN upload_status TEXT DEFAULT NULL",
+        "ALTER TABLE queue ADD COLUMN init_image TEXT DEFAULT NULL",
+        "ALTER TABLE queue ADD COLUMN denoising_strength REAL DEFAULT 0.6",
     ]
     for sql in migrations:
         try:
@@ -148,6 +152,8 @@ class QueueItemCreate(BaseModel):
     batch_count: Optional[int] = 1
     seed: Optional[int] = -1
     auto_upload: Optional[bool] = False
+    init_image: Optional[str] = None        # base64-encoded PNG (no data: prefix)
+    denoising_strength: Optional[float] = 0.6
 
 class ControlAction(BaseModel):
     action: str # start, pause, clear_completed, clear_all
@@ -220,6 +226,8 @@ class QueueWorker:
             loras = json.loads(item['loras'])
             batch_count = item['batch_count']
             start_seed = item['seed']
+            init_image = item['init_image']           # None = txt2img, base64 str = img2img
+            denoising_strength = item['denoising_strength'] or 0.6
             
             # Update status to processing if it was pending
             if item['status'] == 'pending':
@@ -292,7 +300,9 @@ class QueueWorker:
                         cfg_scale=cfg_scale,
                         width=width,
                         height=height,
-                        loras=loras
+                        loras=loras,
+                        init_image=init_image,
+                        denoising_strength=denoising_strength
                     )
                     
                     if success:
@@ -358,7 +368,7 @@ class QueueWorker:
             self.current_task = None
             time.sleep(0.5)
 
-    def _generate_and_save(self, api_endpoint, queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras):
+    def _generate_and_save(self, api_endpoint, queue_id, prompt, negative_prompt, model, seed, steps, cfg_scale, width, height, loras, init_image=None, denoising_strength=0.6):
         # Format LoRAs for Draw Things API
         formatted_loras = []
         for lora in loras:
@@ -379,19 +389,41 @@ class QueueWorker:
                 "weight": lora["weight"]
             })
 
-        payload = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "seed": seed,
-            "steps": steps,
-            "cfg_scale": cfg_scale,
-            "width": width,
-            "height": height,
-            "model": model,
-            "loras": formatted_loras,
-            "batch_size": 1,
-            "n_iter": 1
-        }
+        # Determine endpoint and build payload
+        is_i2i = bool(init_image)
+        if is_i2i:
+            # Swap txt2img endpoint for img2img
+            endpoint = api_endpoint.replace("/txt2img", "/img2img")
+            payload = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "init_images": [init_image],
+                "denoising_strength": denoising_strength,
+                "seed": seed,
+                "steps": steps,
+                "cfg_scale": cfg_scale,
+                "width": width,
+                "height": height,
+                "model": model,
+                "loras": formatted_loras,
+                "batch_size": 1,
+                "n_iter": 1
+            }
+        else:
+            endpoint = api_endpoint
+            payload = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "seed": seed,
+                "steps": steps,
+                "cfg_scale": cfg_scale,
+                "width": width,
+                "height": height,
+                "model": model,
+                "loras": formatted_loras,
+                "batch_size": 1,
+                "n_iter": 1
+            }
 
         filename = f"dt_{int(time.time())}_{seed}.png"
         filepath = os.path.join(OUTPUT_DIR, filename)
@@ -406,9 +438,10 @@ class QueueWorker:
 
         if not last_error:
             try:
-                print("  -> Sending API request...")
+                mode = "img2img" if is_i2i else "txt2img"
+                print(f"  -> Sending {mode} API request...")
                 response = requests.post(
-                    api_endpoint, 
+                    endpoint, 
                     json=payload, 
                     headers={"Content-Type": "application/json"}, 
                     timeout=1800  # 30 minutes timeout
@@ -669,6 +702,8 @@ def get_queue():
             "created_at": r["created_at"],
             "auto_upload": bool(r["auto_upload"]),
             "upload_status": r["upload_status"],
+            "init_image": r["init_image"],        # base64 or None
+            "denoising_strength": r["denoising_strength"],
         })
     return result
 
@@ -683,8 +718,8 @@ def add_to_queue(item: QueueItemCreate):
     next_priority = (row["max_p"] or 0) + 1
     
     cursor.execute("""
-        INSERT INTO queue (prompt, negative_prompt, models, steps, cfg_scale, width, height, loras, batch_count, seed, status, priority, auto_upload)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        INSERT INTO queue (prompt, negative_prompt, models, steps, cfg_scale, width, height, loras, batch_count, seed, status, priority, auto_upload, init_image, denoising_strength)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
     """, (
         item.prompt,
         item.negative_prompt,
@@ -697,7 +732,9 @@ def add_to_queue(item: QueueItemCreate):
         item.batch_count,
         item.seed,
         next_priority,
-        1 if item.auto_upload else 0
+        1 if item.auto_upload else 0,
+        item.init_image,
+        item.denoising_strength
     ))
     conn.commit()
     item_id = cursor.lastrowid
@@ -738,7 +775,7 @@ def update_queue_item(item_id: int, item: QueueItemCreate):
         
     cursor.execute("""
         UPDATE queue 
-        SET prompt = ?, negative_prompt = ?, models = ?, steps = ?, cfg_scale = ?, width = ?, height = ?, loras = ?, batch_count = ?, seed = ?, auto_upload = ?
+        SET prompt = ?, negative_prompt = ?, models = ?, steps = ?, cfg_scale = ?, width = ?, height = ?, loras = ?, batch_count = ?, seed = ?, auto_upload = ?, init_image = ?, denoising_strength = ?
         WHERE id = ? AND status = 'pending'
     """, (
         item.prompt,
@@ -752,6 +789,8 @@ def update_queue_item(item_id: int, item: QueueItemCreate):
         item.batch_count,
         item.seed,
         1 if item.auto_upload else 0,
+        item.init_image,
+        item.denoising_strength,
         item_id
     ))
     conn.commit()

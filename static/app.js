@@ -55,6 +55,60 @@ let sizeState = {
     size: 1024
 };
 
+// Reference image state (base64 without data: prefix, or null)
+let refImageBase64 = { create: null, edit: null };
+
+// ==============================================================================
+// REFERENCE IMAGE HANDLERS (img2img)
+// ==============================================================================
+function handleRefImageDragOver(e) {
+    e.preventDefault();
+    e.currentTarget.classList.add('drag-over');
+}
+function handleRefImageDragLeave(e) {
+    e.currentTarget.classList.remove('drag-over');
+}
+function handleRefImageDrop(e, ctx) {
+    e.preventDefault();
+    e.currentTarget.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith('image/')) loadRefImageFile(file, ctx);
+}
+function handleRefImageFile(e, ctx) {
+    const file = e.target.files[0];
+    if (file) loadRefImageFile(file, ctx);
+    e.target.value = ''; // reset so same file can be re-selected
+}
+function loadRefImageFile(file, ctx) {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+        const dataUrl = ev.target.result;
+        // Strip the data:image/...;base64, prefix — store raw base64
+        refImageBase64[ctx] = dataUrl.split(',')[1];
+        // Show thumbnail
+        const prefix = ctx === 'edit' ? 'edit-' : '';
+        document.getElementById(`${prefix}ref-image-thumb`).src = dataUrl;
+        document.getElementById(`${prefix}dropzone-idle`).classList.add('hidden');
+        document.getElementById(`${prefix}dropzone-preview`).classList.remove('hidden');
+        document.getElementById(`${prefix}denoising-group`).classList.remove('hidden');
+    };
+    reader.readAsDataURL(file);
+}
+function clearRefImage(ctx, event) {
+    event.stopPropagation(); // don't re-open file picker
+    refImageBase64[ctx] = null;
+    const prefix = ctx === 'edit' ? 'edit-' : '';
+    document.getElementById(`${prefix}ref-image-thumb`).src = '';
+    document.getElementById(`${prefix}dropzone-idle`).classList.remove('hidden');
+    document.getElementById(`${prefix}dropzone-preview`).classList.add('hidden');
+    document.getElementById(`${prefix}denoising-group`).classList.add('hidden');
+    if (ctx === 'create') {
+        document.getElementById('ref-image-input').value = '';
+    } else {
+        document.getElementById('edit-ref-image-input').value = '';
+    }
+}
+
 function updateDimensions() {
     try {
         let r = sizeState.ratio || '1:1';
@@ -460,15 +514,18 @@ async function handleTaskFormSubmit(e) {
         loras: selectedLoras,
         batch_count: batchCount,
         seed,
-        auto_upload: document.getElementById('auto-upload')?.checked || false
+        auto_upload: document.getElementById('auto-upload')?.checked || false,
+        init_image: refImageBase64.create || null,
+        denoising_strength: refImageBase64.create ? parseFloat(document.getElementById('denoising-strength').value) : 0.6
     };
 
     try {
         await API.addToQueue(taskData);
         showToast("Task successfully queued!");
         
-        // Reset only the prompt textarea, keep other settings for convenience
+        // Reset only the prompt textarea and ref image, keep other settings
         document.getElementById('prompt').value = '';
+        clearRefImage('create', { stopPropagation: () => {} });
         
         await refreshQueue();
     } catch (err) {
@@ -517,6 +574,9 @@ function renderQueue() {
             uploadBadge = '<span class="badge badge-auto-upload">⬆ Auto-upload</span>';
         }
         
+        // i2i badge
+        const i2iBadge = item.init_image ? '<span class="badge badge-i2i">i2i</span>' : '';
+        
         return `
             <div class="${cardClass}" draggable="true" data-id="${item.id}" ondragstart="handleDragStart(event)" ondragover="handleDragOver(event)" ondrop="handleDrop(event)" ondragend="handleDragEnd(event)">
                 <div class="queue-item-top">
@@ -547,6 +607,7 @@ function renderQueue() {
                         <span>Size: ${item.width}x${item.height}</span>
                         <span>Batch: ${item.batch_count}</span>
                         <span class="badge badge-${item.status}">${item.status}</span>
+                        ${i2iBadge}
                         ${uploadBadge}
                     </div>
                 </div>
@@ -1163,6 +1224,19 @@ function openEditModal(itemId) {
     // Set aspect ratio and image size
     setEditSizeStateFromDimensions(item.width, item.height);
     
+    // Restore reference image if present
+    if (item.init_image) {
+        refImageBase64.edit = item.init_image;
+        document.getElementById('edit-ref-image-thumb').src = 'data:image/png;base64,' + item.init_image;
+        document.getElementById('edit-dropzone-idle').classList.add('hidden');
+        document.getElementById('edit-dropzone-preview').classList.remove('hidden');
+        document.getElementById('edit-denoising-group').classList.remove('hidden');
+        document.getElementById('edit-denoising-strength').value = item.denoising_strength || 0.6;
+        document.getElementById('edit-denoising-value-display').textContent = parseFloat(item.denoising_strength || 0.6).toFixed(2);
+    } else {
+        clearRefImage('edit', { stopPropagation: () => {} });
+    }
+    
     toggleModal('edit-modal', true);
 }
 
@@ -1211,7 +1285,10 @@ async function saveQueueItemUpdate() {
         height,
         loras: selectedLoras,
         batch_count: batchCount,
-        seed
+        seed,
+        auto_upload: document.getElementById('edit-auto-upload')?.checked || false,
+        init_image: refImageBase64.edit || null,
+        denoising_strength: refImageBase64.edit ? parseFloat(document.getElementById('edit-denoising-strength').value) : 0.6
     };
 
     try {
