@@ -163,13 +163,24 @@ function loadRefImageFile(file, ctx) {
         // Strip the data:image/...;base64, prefix — store raw base64
         refImageBase64[ctx] = dataUrl.split(',')[1];
         
+        const container = ctx === 'create' ? document.getElementById('create-form-container') : document.getElementById('edit-form-container');
+        if (!container) return;
+        
         // Show thumbnail and hide idle text
-        const prefix = ctx === 'edit' ? 'edit-' : '';
-        document.getElementById(`${prefix}ref-image-thumb`).src = dataUrl;
-        document.getElementById(`${prefix}dropzone-idle`).style.display = 'none';
-        document.getElementById(`${prefix}dropzone-preview`).classList.remove('hidden');
-        document.getElementById(`${prefix}dropzone-preview`).style.display = 'block';
-        document.getElementById(`${prefix}denoising-group`).classList.remove('hidden');
+        const thumb = container.querySelector('.ref-image-thumb');
+        if (thumb) thumb.src = dataUrl;
+        
+        const idle = container.querySelector('.dropzone-idle');
+        if (idle) idle.style.display = 'none';
+        
+        const preview = container.querySelector('.dropzone-preview');
+        if (preview) {
+            preview.classList.remove('hidden');
+            preview.style.display = 'block';
+        }
+        
+        const group = container.querySelector('.denoising-group');
+        if (group) group.classList.remove('hidden');
         
         // Auto-detect aspect ratio
         const img = new Image();
@@ -196,7 +207,6 @@ function loadRefImageFile(file, ctx) {
             }
             
             // Auto-select the closest ratio button for this context
-            // Only update ratio if we are in 'create' context, edit context doesn't have a simple ratio selector
             if (ctx === 'create') {
                 const ratioBtns = document.querySelectorAll('#create-form-container .btn-ratio');
                 ratioBtns.forEach(btn => {
@@ -210,25 +220,34 @@ function loadRefImageFile(file, ctx) {
     };
     reader.readAsDataURL(file);
 }
+
 function clearRefImage(ctx, event) {
-    event.stopPropagation(); // don't re-open file picker
+    if (event && event.stopPropagation) event.stopPropagation(); // don't re-open file picker
     refImageBase64[ctx] = null;
-    const prefix = ctx === 'edit' ? 'edit-' : '';
-    document.getElementById(`${prefix}ref-image-thumb`).src = '';
     
-    document.getElementById(`${prefix}dropzone-idle`).classList.remove('hidden');
-    document.getElementById(`${prefix}dropzone-idle`).style.display = ''; // Reset display style
+    const container = ctx === 'create' ? document.getElementById('create-form-container') : document.getElementById('edit-form-container');
+    if (!container) return;
     
-    document.getElementById(`${prefix}dropzone-preview`).classList.add('hidden');
-    document.getElementById(`${prefix}dropzone-preview`).style.display = 'none';
+    const thumb = container.querySelector('.ref-image-thumb');
+    if (thumb) thumb.src = '';
     
-    document.getElementById(`${prefix}denoising-group`).classList.add('hidden');
-    
-    if (ctx === 'create') {
-        container.querySelector('.input-ref-image').value = '';
-    } else {
-        document.getElementById('edit-ref-image-input').value = '';
+    const idle = container.querySelector('.dropzone-idle');
+    if (idle) {
+        idle.classList.remove('hidden');
+        idle.style.display = ''; 
     }
+    
+    const preview = container.querySelector('.dropzone-preview');
+    if (preview) {
+        preview.classList.add('hidden');
+        preview.style.display = 'none';
+    }
+    
+    const group = container.querySelector('.denoising-group');
+    if (group) group.classList.add('hidden');
+    
+    const input = container.querySelector('.input-ref-image');
+    if (input) input.value = '';
 }
 
 
