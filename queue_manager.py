@@ -740,6 +740,11 @@ def get_queue():
         })
     return result
 
+def round_to_64(val: Optional[int]) -> int:
+    if not val:
+        return 512
+    return int(round(val / 64.0) * 64)
+
 @app.post("/api/queue")
 def add_to_queue(item: QueueItemCreate):
     conn = get_db()
@@ -759,8 +764,8 @@ def add_to_queue(item: QueueItemCreate):
         json.dumps(item.models),
         item.steps,
         item.cfg_scale,
-        item.width,
-        item.height,
+        round_to_64(item.width),
+        round_to_64(item.height),
         json.dumps([{"file": l.file, "weight": l.weight} for l in item.loras]),
         item.batch_count,
         item.seed,
@@ -816,8 +821,8 @@ def update_queue_item(item_id: int, item: QueueItemCreate):
         json.dumps(item.models),
         item.steps,
         item.cfg_scale,
-        item.width,
-        item.height,
+        round_to_64(item.width),
+        round_to_64(item.height),
         json.dumps([{"file": l.file, "weight": l.weight} for l in item.loras]),
         item.batch_count,
         item.seed,

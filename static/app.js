@@ -284,8 +284,8 @@ function updateDimensions(ctx = 'create') {
             }
         }
         
-        w = Math.round(w / 32) * 32;
-        h = Math.round(h / 32) * 32;
+        w = Math.round(w / 64) * 64;
+        h = Math.round(h / 64) * 64;
         
         w = Math.max(512, Math.min(2048, w));
         h = Math.max(512, Math.min(2048, h));
