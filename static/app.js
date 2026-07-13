@@ -61,6 +61,80 @@ let sizeState = {
 // Reference image state (base64 without data: prefix, or null)
 let refImageBase64 = { create: null, edit: null };
 
+
+// ==============================================================================
+// INIT FORMS
+// ==============================================================================
+function initForms() {
+    const template = document.getElementById('task-form-template');
+    
+    // Init Create Form
+    const createContainer = document.getElementById('create-form-container');
+    if (createContainer && template) {
+        createContainer.appendChild(template.content.cloneNode(true));
+        setupFormListeners(createContainer, 'create');
+        populateModelsAndLoras(createContainer, 'create');
+    }
+    
+    // Init Edit Form
+    const editContainer = document.getElementById('edit-form-container');
+    if (editContainer && template) {
+        editContainer.appendChild(template.content.cloneNode(true));
+        setupFormListeners(editContainer, 'edit');
+    }
+}
+
+function setupFormListeners(container, ctx) {
+    const stateObj = ctx === 'create' ? sizeState : editSizeState;
+    const isEdit = ctx === 'edit';
+    
+    // Aspect ratio selection
+    const ratioButtons = container.querySelectorAll('.btn-ratio');
+    ratioButtons.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            ratioButtons.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            stateObj.ratio = btn.getAttribute('data-ratio');
+            updateDimensions(ctx);
+        });
+    });
+
+    // Size slider input
+    const sizeSlider = container.querySelector('.input-size-slider');
+    if (sizeSlider) {
+        sizeSlider.addEventListener('input', (e) => {
+            stateObj.size = parseInt(e.target.value);
+            updateDimensions(ctx);
+        });
+    }
+
+    // Ref image dropzone
+    const dropzone = container.querySelector('.container-ref-dropzone');
+    const refImageInput = container.querySelector('.input-ref-image');
+    if (dropzone) {
+        dropzone.addEventListener('dragover', handleRefImageDragOver);
+        dropzone.addEventListener('dragleave', handleRefImageDragLeave);
+        dropzone.addEventListener('drop', (e) => handleRefImageDrop(e, ctx));
+        dropzone.addEventListener('click', () => refImageInput.click());
+    }
+    
+    if (refImageInput) {
+        refImageInput.addEventListener('change', (e) => handleRefImageFile(e, ctx));
+    }
+    
+    const removeRefBtn = container.querySelector('.btn-remove-ref');
+    if (removeRefBtn) {
+        removeRefBtn.addEventListener('click', (e) => clearRefImage(ctx, e));
+    }
+    
+    const denoisingSlider = container.querySelector('.input-denoising-strength');
+    if (denoisingSlider) {
+        denoisingSlider.addEventListener('input', (e) => {
+            container.querySelector('.denoising-value-display').textContent = parseFloat(e.target.value).toFixed(2);
+        });
+    }
+}
+
 // ==============================================================================
 // REFERENCE IMAGE HANDLERS (img2img)
 // ==============================================================================
@@ -124,7 +198,7 @@ function loadRefImageFile(file, ctx) {
             // Auto-select the closest ratio button for this context
             // Only update ratio if we are in 'create' context, edit context doesn't have a simple ratio selector
             if (ctx === 'create') {
-                const ratioBtns = document.querySelectorAll('#task-form .btn-ratio');
+                const ratioBtns = document.querySelectorAll('#create-form-container .btn-ratio');
                 ratioBtns.forEach(btn => {
                     if (btn.getAttribute('data-ratio') === closestRatio) {
                         btn.click();
@@ -151,16 +225,20 @@ function clearRefImage(ctx, event) {
     document.getElementById(`${prefix}denoising-group`).classList.add('hidden');
     
     if (ctx === 'create') {
-        document.getElementById('ref-image-input').value = '';
+        container.querySelector('.input-ref-image').value = '';
     } else {
         document.getElementById('edit-ref-image-input').value = '';
     }
 }
 
-function updateDimensions() {
+
+function updateDimensions(ctx = 'create') {
     try {
-        let r = sizeState.ratio || '1:1';
-        let s = sizeState.size || 1024;
+        const stateObj = ctx === 'create' ? sizeState : editSizeState;
+        const container = ctx === 'create' ? document.getElementById('create-form-container') : document.getElementById('edit-form-container');
+        
+        let r = stateObj.ratio || '1:1';
+        let s = stateObj.size || 1024;
         let w = s;
         let h = s;
         
@@ -193,73 +271,77 @@ function updateDimensions() {
         w = Math.max(512, Math.min(2048, w));
         h = Math.max(512, Math.min(2048, h));
         
-        const widthInput = document.getElementById('width');
-        const heightInput = document.getElementById('height');
-        const displaySpan = document.getElementById('size-value-display');
+        const widthInput = container.querySelector('.input-width');
+        const heightInput = container.querySelector('.input-height');
+        const displaySpan = container.querySelector('.size-value-display');
         
         if (widthInput) widthInput.value = w;
         if (heightInput) heightInput.value = h;
         if (displaySpan) displaySpan.innerText = `${s}px`;
         
-        saveParamsToLocalStorage(); // Auto-save on dimensions change
+        if (ctx === 'create') saveParamsToLocalStorage(); // Auto-save on dimensions change
     } catch (e) {
         console.error("Error updating dimensions:", e);
     }
 }
 
-function setSizeStateFromDimensions(w, h) {
-    let q = w / h;
-    let size = Math.max(w, h);
-    let ratio = '1:1';
+function setSizeStateFromDimensions(w, h, ctx = 'create') {
+    const predefinedSizes = [
+        { ratio: '1:1', size: 1024, width: 1024, height: 1024 },
+        { ratio: '3:2', size: 1024, width: 1024, height: 672 },
+        { ratio: '4:3', size: 1024, width: 1024, height: 768 },
+        { ratio: '16:9', size: 1024, width: 1024, height: 576 },
+        { ratio: '2:3', size: 1024, width: 672, height: 1024 },
+        { ratio: '3:4', size: 1024, width: 768, height: 1024 },
+        { ratio: '9:16', size: 1024, width: 576, height: 1024 },
+        { ratio: '1:1', size: 512, width: 512, height: 512 },
+        { ratio: '3:2', size: 512, width: 512, height: 352 },
+        { ratio: '4:3', size: 512, width: 512, height: 384 },
+        { ratio: '16:9', size: 512, width: 512, height: 288 },
+        { ratio: '2:3', size: 512, width: 352, height: 512 },
+        { ratio: '3:4', size: 512, width: 384, height: 512 },
+        { ratio: '9:16', size: 512, width: 288, height: 512 },
+    ];
     
-    if (Math.abs(q - 1.0) < 0.05) {
-        ratio = '1:1';
-    } else if (Math.abs(q - 0.666) < 0.05) {
-        ratio = '2:3';
-    } else if (Math.abs(q - 1.5) < 0.05) {
-        ratio = '3:2';
-    } else if (Math.abs(q - 0.75) < 0.05) {
-        ratio = '3:4';
-    } else if (Math.abs(q - 1.333) < 0.05) {
-        ratio = '4:3';
-    } else if (Math.abs(q - 0.562) < 0.05) {
-        ratio = '9:16';
-    } else if (Math.abs(q - 1.777) < 0.05) {
-        ratio = '16:9';
-    } else {
-        // Fallback: if it's some custom size, we retain the exact values
-        document.getElementById('width').value = w;
-        document.getElementById('height').value = h;
-        return;
+    const stateObj = ctx === 'create' ? sizeState : editSizeState;
+    const container = ctx === 'create' ? document.getElementById('create-form-container') : document.getElementById('edit-form-container');
+    if (!container) return;
+    
+    let matchedRatio = '1:1';
+    let matchedSize = 1024;
+    
+    for (const ps of predefinedSizes) {
+        if (ps.width === w && ps.height === h) {
+            matchedRatio = ps.ratio;
+            matchedSize = ps.size;
+            break;
+        }
     }
     
-    sizeState.ratio = ratio;
-    sizeState.size = size;
+    stateObj.ratio = matchedRatio;
+    stateObj.size = matchedSize;
     
-    // Update active class on ratio buttons
-    const ratioButtons = document.querySelectorAll('#task-form .btn-ratio');
+    const ratioButtons = container.querySelectorAll('.btn-ratio');
     ratioButtons.forEach(btn => {
-        if (btn.getAttribute('data-ratio') === ratio) btn.classList.add('active');
+        if (btn.getAttribute('data-ratio') === matchedRatio) btn.classList.add('active');
         else btn.classList.remove('active');
     });
     
-    // Update slider value
-    const sizeSlider = document.getElementById('size-slider');
-    if (sizeSlider) {
-        sizeSlider.value = size;
-    }
+    const sizeSlider = container.querySelector('.input-size-slider');
+    if (sizeSlider) sizeSlider.value = matchedSize;
     
-    updateDimensions();
+    updateDimensions(ctx);
 }
+
 
 function saveParamsToLocalStorage() {
     try {
-        const promptEl = document.getElementById('prompt');
-        const negEl = document.getElementById('negative-prompt');
+        const promptEl = document.querySelector('#create-form-container .input-prompt');
+        const negEl = document.querySelector('#create-form-container .input-negative-prompt');
         const stepsEl = document.getElementById('steps');
-        const cfgEl = document.getElementById('cfg-scale');
-        const batchEl = document.getElementById('batch-count');
-        const seedEl = document.getElementById('seed');
+        const cfgEl = document.querySelector('#create-form-container .input-cfg-scale');
+        const batchEl = document.querySelector('#create-form-container .input-batch-count');
+        const seedEl = document.querySelector('#create-form-container .input-seed');
         
         const params = {
             prompt: promptEl ? promptEl.value : '',
@@ -272,7 +354,7 @@ function saveParamsToLocalStorage() {
             size: sizeState.size,
             
             // Models selection
-            models: Array.from(document.querySelectorAll('input[name="model"]:checked')).map(el => el.value),
+            models: Array.from(document.querySelectorAll('#create-form-container input[name="model"]:checked')).map(el => el.value),
             
             // LoRAs selection
             loras: Array.from(document.querySelectorAll('.lora-item-row.active')).map(row => {
@@ -295,7 +377,7 @@ function restoreParamsFromLocalStorage() {
         const dataStr = localStorage.getItem('dt_queue_params');
         if (!dataStr) {
             // Default batch count to 2 if no history settings
-            const batchEl = document.getElementById('batch-count');
+            const batchEl = document.querySelector('#create-form-container .input-batch-count');
             if (batchEl) batchEl.value = 2;
             return;
         }
@@ -304,36 +386,36 @@ function restoreParamsFromLocalStorage() {
         if (!params) return;
         
         // Restore values
-        if (params.prompt !== undefined && document.getElementById('prompt')) 
-            document.getElementById('prompt').value = params.prompt;
-        if (params.negative_prompt !== undefined && document.getElementById('negative-prompt')) 
-            document.getElementById('negative-prompt').value = params.negative_prompt;
+        if (params.prompt !== undefined && document.querySelector('#create-form-container .input-prompt')) 
+            document.querySelector('#create-form-container .input-prompt').value = params.prompt;
+        if (params.negative_prompt !== undefined && document.querySelector('#create-form-container .input-negative-prompt')) 
+            document.querySelector('#create-form-container .input-negative-prompt').value = params.negative_prompt;
         if (params.steps !== undefined && document.getElementById('steps')) 
-            document.getElementById('steps').value = params.steps;
-        if (params.cfg_scale !== undefined && document.getElementById('cfg-scale')) 
-            document.getElementById('cfg-scale').value = params.cfg_scale;
+            document.querySelector('#create-form-container .input-steps').value = params.steps;
+        if (params.cfg_scale !== undefined && document.querySelector('#create-form-container .input-cfg-scale')) 
+            document.querySelector('#create-form-container .input-cfg-scale').value = params.cfg_scale;
         
         // Set batch-count (safely defaulting to 2)
-        const batchEl = document.getElementById('batch-count');
+        const batchEl = document.querySelector('#create-form-container .input-batch-count');
         if (batchEl) {
             batchEl.value = params.batch_count !== undefined ? params.batch_count : 2;
         }
         
-        if (params.seed !== undefined && document.getElementById('seed')) 
-            document.getElementById('seed').value = params.seed;
+        if (params.seed !== undefined && document.querySelector('#create-form-container .input-seed')) 
+            document.querySelector('#create-form-container .input-seed').value = params.seed;
         
         if (params.ratio) sizeState.ratio = params.ratio;
         if (params.size) sizeState.size = params.size;
         
         // Update active ratio buttons
-        const ratioButtons = document.querySelectorAll('#task-form .btn-ratio');
+        const ratioButtons = document.querySelectorAll('#create-form-container .btn-ratio');
         ratioButtons.forEach(btn => {
             if (btn.getAttribute('data-ratio') === sizeState.ratio) btn.classList.add('active');
             else btn.classList.remove('active');
         });
         
         // Update size slider
-        const sizeSlider = document.getElementById('size-slider');
+        const sizeSlider = document.querySelector('#create-form-container .input-size-slider');
         if (sizeSlider && params.size) {
             sizeSlider.value = params.size;
         }
@@ -381,6 +463,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function initApp() {
     updateDimensions(); // Set initial dimensions instantly!
+    initForms();
     setupEventListeners();
     
     try {
@@ -437,9 +520,6 @@ async function saveSettings() {
 // MODEL SCANNING & RENDERING
 // ==============================================================================
 async function loadModels() {
-    const modelsContainer = document.getElementById('models-list-container');
-    const lorasContainer = document.getElementById('loras-list-container');
-    
     try {
         const data = await API.getModels();
         state.models = data.models;
@@ -456,56 +536,50 @@ async function loadModels() {
             statusEl.style.color = "var(--accent-red)";
         }
 
-        // Render Models Checkboxes
-        if (state.models.length === 0) {
-            modelsContainer.innerHTML = '<div class="loading-inline">No models found in Draw Things folder.</div>';
-        } else {
-            modelsContainer.innerHTML = state.models.map((m, idx) => `
-                <label class="model-checkbox-label">
-                    <input type="checkbox" name="model" value="${m}" ${idx === 0 ? 'checked' : ''}>
-                    <span>${m}</span>
-                </label>
-            `).join('');
-        }
-
-        // Render LoRAs Checkboxes + Weight Sliders
-        if (state.loras.length === 0) {
-            lorasContainer.innerHTML = '<div class="loading-inline">No LoRAs found in Draw Things folder.</div>';
-        } else {
-            lorasContainer.innerHTML = state.loras.map((l) => `
-                <div class="lora-item-row" id="lora-row-${cleanId(l)}">
-                    <div class="lora-item-top">
-                        <label class="lora-checkbox-container">
-                            <input type="checkbox" name="lora-enable" value="${l}" onchange="toggleLoraSlider('${cleanId(l)}')">
-                            <span>${l}</span>
-                        </label>
-                    </div>
-                    <div class="lora-weight-container">
-                        <input type="range" class="lora-weight-slider" id="lora-weight-${cleanId(l)}" min="-2.0" max="2.0" step="0.05" value="1.0" oninput="updateLoraWeightVal('${cleanId(l)}')">
-                        <span class="lora-weight-value" id="lora-val-${cleanId(l)}">1.0</span>
-                    </div>
-                </div>
-            `).join('');
+        const createContainer = document.getElementById('create-form-container');
+        if (createContainer) {
+            populateModelsAndLoras(createContainer, 'create');
         }
     } catch (e) {
         console.error("Failed to load models/loras:", e);
-        modelsContainer.innerHTML = '<div class="loading-inline" style="color: var(--accent-red)">Error loading models directory.</div>';
-        lorasContainer.innerHTML = '<div class="loading-inline" style="color: var(--accent-red)">Error loading LoRAs directory.</div>';
     }
 }
 
-function toggleLoraSlider(cleanedId) {
-    const row = document.getElementById(`lora-row-${cleanedId}`);
-    if (row) {
-        row.classList.toggle('active');
-    }
-}
+function populateModelsAndLoras(container, ctx) {
+    const modelsContainer = container.querySelector('.models-list-container');
+    const lorasContainer = container.querySelector('.loras-list-container');
+    if (!modelsContainer || !lorasContainer) return;
 
-function updateLoraWeightVal(cleanedId) {
-    const slider = document.getElementById(`lora-weight-${cleanedId}`);
-    const valSpan = document.getElementById(`lora-val-${cleanedId}`);
-    if (slider && valSpan) {
-        valSpan.innerText = parseFloat(slider.value).toFixed(1);
+    // Render Models Checkboxes
+    if (state.models.length === 0) {
+        modelsContainer.innerHTML = '<div class="loading-inline">No models found in Draw Things folder.</div>';
+    } else {
+        modelsContainer.innerHTML = state.models.map((m, idx) => `
+            <label class="model-checkbox-label">
+                <input type="checkbox" name="model" value="${m}" ${idx === 0 ? 'checked' : ''}>
+                <span>${m}</span>
+            </label>
+        `).join('');
+    }
+
+    // Render LoRAs Checkboxes + Weight Sliders
+    if (state.loras.length === 0) {
+        lorasContainer.innerHTML = '<div class="loading-inline">No LoRAs found in Draw Things folder.</div>';
+    } else {
+        lorasContainer.innerHTML = state.loras.map((l) => `
+            <div class="lora-item-row" data-id="${cleanId(l)}">
+                <div class="lora-item-top">
+                    <label class="lora-checkbox-container">
+                        <input type="checkbox" name="lora-enable" value="${l}" onchange="this.closest('.lora-item-row').classList.toggle('active', this.checked)">
+                        <span>${l}</span>
+                    </label>
+                </div>
+                <div class="lora-weight-container">
+                    <input type="range" class="lora-weight-slider" min="-2.0" max="2.0" step="0.05" value="1.0" oninput="this.nextElementSibling.innerText = parseFloat(this.value).toFixed(1)">
+                    <span class="lora-weight-value">1.0</span>
+                </div>
+            </div>
+        `).join('');
     }
 }
 
@@ -519,17 +593,17 @@ function cleanId(filename) {
 async function handleTaskFormSubmit(e) {
     e.preventDefault();
     
-    const prompt = document.getElementById('prompt').value.trim();
-    const negativePrompt = document.getElementById('negative-prompt').value.trim();
-    const width = parseInt(document.getElementById('width').value);
-    const height = parseInt(document.getElementById('height').value);
-    const steps = parseInt(document.getElementById('steps').value);
-    const cfgScale = parseFloat(document.getElementById('cfg-scale').value);
-    const batchCount = parseInt(document.getElementById('batch-count').value);
-    const seed = parseInt(document.getElementById('seed').value);
+    const prompt = document.querySelector('#create-form-container .input-prompt').value.trim();
+    const negativePrompt = document.querySelector('#create-form-container .input-negative-prompt').value.trim();
+    const width = parseInt(document.querySelector('#create-form-container .input-width').value);
+    const height = parseInt(document.querySelector('#create-form-container .input-height').value);
+    const steps = parseInt(document.querySelector('#create-form-container .input-steps').value);
+    const cfgScale = parseFloat(document.querySelector('#create-form-container .input-cfg-scale').value);
+    const batchCount = parseInt(document.querySelector('#create-form-container .input-batch-count').value);
+    const seed = parseInt(document.querySelector('#create-form-container .input-seed').value);
 
     // Selected Models
-    const modelCheckedElements = document.querySelectorAll('input[name="model"]:checked');
+    const modelCheckedElements = document.querySelectorAll('#create-form-container input[name="model"]:checked');
     const selectedModels = Array.from(modelCheckedElements).map(el => el.value);
     
     if (selectedModels.length === 0) {
@@ -564,7 +638,7 @@ async function handleTaskFormSubmit(e) {
         seed,
         auto_upload: document.getElementById('auto-upload')?.checked || false,
         init_image: refImageBase64.create || null,
-        denoising_strength: refImageBase64.create ? parseFloat(document.getElementById('denoising-strength').value) : 0.6
+        denoising_strength: refImageBase64.create ? parseFloat(document.querySelector('#create-form-container .input-denoising-strength').value) : 0.6
     };
 
     try {
@@ -572,7 +646,7 @@ async function handleTaskFormSubmit(e) {
         showToast("Task successfully queued!");
         
         // Reset only the prompt textarea and ref image, keep other settings
-        document.getElementById('prompt').value = '';
+        document.querySelector('#create-form-container .input-prompt').value = '';
         clearRefImage('create', { stopPropagation: () => {} });
         
         await refreshQueue();
@@ -1006,10 +1080,10 @@ async function sendToImg2Img(item) {
             refImageBase64.create = base64data.split(',')[1];
             
             // Update UI for the reference image dropzone
-            document.getElementById('ref-image-thumb').src = base64data;
-            document.getElementById('dropzone-idle').classList.add('hidden');
-            document.getElementById('dropzone-preview').classList.remove('hidden');
-            document.getElementById('denoising-group').classList.remove('hidden');
+            container.querySelector('.ref-image-thumb').src = base64data;
+            container.querySelector('.dropzone-idle').classList.add('hidden');
+            container.querySelector('.dropzone-preview').classList.remove('hidden');
+            container.querySelector('.denoising-group').classList.remove('hidden');
             
             // Also copy the parameters to make it easy to start modifying
             reuseParameters(item);
@@ -1024,11 +1098,11 @@ async function sendToImg2Img(item) {
 
 function reuseParameters(item) {
     // Populate form inputs
-    document.getElementById('prompt').value = item.prompt;
-    document.getElementById('negative-prompt').value = item.negative_prompt || '';
-    document.getElementById('steps').value = item.steps || 8;
-    document.getElementById('cfg-scale').value = item.cfg_scale || 1.0;
-    document.getElementById('seed').value = item.seed;
+    document.querySelector('#create-form-container .input-prompt').value = item.prompt;
+    document.querySelector('#create-form-container .input-negative-prompt').value = item.negative_prompt || '';
+    document.querySelector('#create-form-container .input-steps').value = item.steps || 8;
+    document.querySelector('#create-form-container .input-cfg-scale').value = item.cfg_scale || 1.0;
+    document.querySelector('#create-form-container .input-seed').value = item.seed;
     
     // Set custom resolution and slider match
     setSizeStateFromDimensions(item.width, item.height);
@@ -1120,149 +1194,6 @@ let editSizeState = {
 
 let currentEditingItemId = null;
 
-function updateEditDimensions() {
-    try {
-        let r = editSizeState.ratio || '1:1';
-        let s = editSizeState.size || 1024;
-        let w = s;
-        let h = s;
-        
-        let parts = r.split(':');
-        let x = parseInt(parts[0]);
-        let y = parseInt(parts[1]);
-        
-        if (x === y) {
-            w = s;
-            h = s;
-        } else if (x < y) { // Portrait
-            h = s;
-            w = s * x / y;
-            if (w < 512) {
-                w = 512;
-                h = 512 * y / x;
-            }
-        } else { // Landscape
-            w = s;
-            h = s * y / x;
-            if (h < 512) {
-                h = 512;
-                w = 512 * x / y;
-            }
-        }
-        
-        w = Math.round(w / 32) * 32;
-        h = Math.round(h / 32) * 32;
-        
-        w = Math.max(512, Math.min(2048, w));
-        h = Math.max(512, Math.min(2048, h));
-        
-        const widthInput = document.getElementById('edit-width');
-        const heightInput = document.getElementById('edit-height');
-        const displaySpan = document.getElementById('edit-size-value-display');
-        
-        if (widthInput) widthInput.value = w;
-        if (heightInput) heightInput.value = h;
-        if (displaySpan) displaySpan.innerText = `${s}px`;
-    } catch (e) {
-        console.error("Error updating edit dimensions:", e);
-    }
-}
-
-function setEditSizeStateFromDimensions(w, h) {
-    let q = w / h;
-    let size = Math.max(w, h);
-    let ratio = '1:1';
-    
-    if (Math.abs(q - 1.0) < 0.05) {
-        ratio = '1:1';
-    } else if (Math.abs(q - 0.666) < 0.05) {
-        ratio = '2:3';
-    } else if (Math.abs(q - 1.5) < 0.05) {
-        ratio = '3:2';
-    } else if (Math.abs(q - 0.75) < 0.05) {
-        ratio = '3:4';
-    } else if (Math.abs(q - 1.333) < 0.05) {
-        ratio = '4:3';
-    } else if (Math.abs(q - 0.562) < 0.05) {
-        ratio = '9:16';
-    } else if (Math.abs(q - 1.777) < 0.05) {
-        ratio = '16:9';
-    } else {
-        document.getElementById('edit-width').value = w;
-        document.getElementById('edit-height').value = h;
-        return;
-    }
-    
-    editSizeState.ratio = ratio;
-    editSizeState.size = size;
-    
-    // Update active class on ratio buttons inside edit modal
-    const ratioButtons = document.querySelectorAll('#edit-aspect-ratio-selector .btn-ratio');
-    ratioButtons.forEach(btn => {
-        if (btn.getAttribute('data-ratio') === ratio) btn.classList.add('active');
-        else btn.classList.remove('active');
-    });
-    
-    // Update slider value
-    const sizeSlider = document.getElementById('edit-size-slider');
-    if (sizeSlider) {
-        sizeSlider.value = size;
-    }
-    
-    updateEditDimensions();
-}
-
-function populateEditModelsAndLoras() {
-    const modelsContainer = document.getElementById('edit-models-list-container');
-    const lorasContainer = document.getElementById('edit-loras-list-container');
-    
-    // Render Models Checkboxes
-    if (state.models.length === 0) {
-        modelsContainer.innerHTML = '<div class="loading-inline">No models found in Draw Things folder.</div>';
-    } else {
-        modelsContainer.innerHTML = state.models.map((m) => `
-            <label class="model-checkbox-label">
-                <input type="checkbox" name="edit-model" value="${m}">
-                <span>${m}</span>
-            </label>
-        `).join('');
-    }
-
-    // Render LoRAs Checkboxes + Weight Sliders
-    if (state.loras.length === 0) {
-        lorasContainer.innerHTML = '<div class="loading-inline">No LoRAs found in Draw Things folder.</div>';
-    } else {
-        lorasContainer.innerHTML = state.loras.map((l) => `
-            <div class="lora-item-row" id="edit-lora-row-${cleanId(l)}">
-                <div class="lora-item-top">
-                    <label class="lora-checkbox-container">
-                        <input type="checkbox" name="edit-lora-enable" value="${l}" onchange="toggleEditLoraSlider('${cleanId(l)}')">
-                        <span>${l}</span>
-                    </label>
-                </div>
-                <div class="lora-weight-container">
-                    <input type="range" class="lora-weight-slider" id="edit-lora-weight-${cleanId(l)}" min="-2.0" max="2.0" step="0.05" value="1.0" oninput="updateEditLoraWeightVal('${cleanId(l)}')">
-                    <span class="lora-weight-value" id="edit-lora-val-${cleanId(l)}">1.0</span>
-                </div>
-            </div>
-        `).join('');
-    }
-}
-
-function toggleEditLoraSlider(cleanedId) {
-    const row = document.getElementById(`edit-lora-row-${cleanedId}`);
-    if (row) {
-        row.classList.toggle('active');
-    }
-}
-
-function updateEditLoraWeightVal(cleanedId) {
-    const slider = document.getElementById(`edit-lora-weight-${cleanedId}`);
-    const valSpan = document.getElementById(`edit-lora-val-${cleanedId}`);
-    if (slider && valSpan) {
-        valSpan.innerText = parseFloat(slider.value).toFixed(1);
-    }
-}
 
 function openEditModal(itemId) {
     const item = state.queue.find(q => q.id === itemId);
@@ -1276,21 +1207,21 @@ function openEditModal(itemId) {
     currentEditingItemId = itemId;
     
     // Populate form fields
-    document.getElementById('edit-prompt').value = item.prompt;
-    document.getElementById('edit-negative-prompt').value = item.negative_prompt || '';
-    document.getElementById('edit-steps').value = item.steps || 8;
-    document.getElementById('edit-cfg-scale').value = item.cfg_scale || 1.0;
-    document.getElementById('edit-batch-count').value = item.batch_count || 2;
-    document.getElementById('edit-seed').value = item.seed;
+    document.querySelector('#edit-form-container .input-prompt').value = item.prompt;
+    document.querySelector('#edit-form-container .input-negative-prompt').value = item.negative_prompt || '';
+    document.querySelector('#edit-form-container .input-steps').value = item.steps || 8;
+    document.querySelector('#edit-form-container .input-cfg-scale').value = item.cfg_scale || 1.0;
+    document.querySelector('#edit-form-container .input-batch-count').value = item.batch_count || 2;
+    document.querySelector('#edit-form-container .input-seed').value = item.seed;
     
-    const autoUploadEl = document.getElementById('edit-auto-upload');
+    const autoUploadEl = document.querySelector('#edit-form-container .input-auto-upload');
     if (autoUploadEl) autoUploadEl.checked = !!item.auto_upload;
     
     // Dynamically populate models & loras lists for the edit modal
-    populateEditModelsAndLoras();
+    populateModelsAndLoras(document.getElementById('edit-form-container'), 'edit');
     
     // Check base models checkmarks
-    const modelCheckboxes = document.querySelectorAll('input[name="edit-model"]');
+    const modelCheckboxes = document.querySelectorAll('#edit-form-container input[name="model"]');
     modelCheckboxes.forEach(cb => {
         cb.checked = item.models.includes(cb.value);
     });
@@ -1298,9 +1229,9 @@ function openEditModal(itemId) {
     // Check and set LoRAs checkboxes & weight sliders
     item.loras.forEach(savedLora => {
         const cleaned = cleanId(savedLora.file);
-        const row = document.getElementById(`edit-lora-row-${cleaned}`);
+        const row = document.querySelector(`#edit-form-container .lora-item-row[data-id="${cleaned}"]`);
         if (row) {
-            const cb = row.querySelector('input[name="edit-lora-enable"]');
+            const cb = row.querySelector('input[name="lora-enable"]');
             const slider = row.querySelector('.lora-weight-slider');
             const valSpan = row.querySelector('.lora-weight-value');
             
@@ -1314,17 +1245,17 @@ function openEditModal(itemId) {
     });
     
     // Set aspect ratio and image size
-    setEditSizeStateFromDimensions(item.width, item.height);
+    setSizeStateFromDimensions(item.width, item.height, 'edit');
     
     // Restore reference image if present
     if (item.init_image) {
         refImageBase64.edit = item.init_image;
-        document.getElementById('edit-ref-image-thumb').src = 'data:image/png;base64,' + item.init_image;
-        document.getElementById('edit-dropzone-idle').classList.add('hidden');
-        document.getElementById('edit-dropzone-preview').classList.remove('hidden');
-        document.getElementById('edit-denoising-group').classList.remove('hidden');
-        document.getElementById('edit-denoising-strength').value = item.denoising_strength || 0.6;
-        document.getElementById('edit-denoising-value-display').textContent = parseFloat(item.denoising_strength || 0.6).toFixed(2);
+        document.querySelector('#edit-form-container .ref-image-thumb').src = 'data:image/png;base64,' + item.init_image;
+        document.querySelector('#edit-form-container .dropzone-idle').classList.add('hidden');
+        document.querySelector('#edit-form-container .dropzone-preview').classList.remove('hidden');
+        document.querySelector('#edit-form-container .denoising-group').classList.remove('hidden');
+        document.querySelector('#edit-form-container .input-denoising-strength').value = item.denoising_strength || 0.6;
+        document.querySelector('#edit-form-container .denoising-value-display').textContent = parseFloat(item.denoising_strength || 0.6).toFixed(2);
     } else {
         clearRefImage('edit', { stopPropagation: () => {} });
     }
@@ -1335,17 +1266,17 @@ function openEditModal(itemId) {
 async function saveQueueItemUpdate() {
     if (!currentEditingItemId) return;
     
-    const prompt = document.getElementById('edit-prompt').value.trim();
-    const negativePrompt = document.getElementById('edit-negative-prompt').value.trim();
-    const width = parseInt(document.getElementById('edit-width').value);
-    const height = parseInt(document.getElementById('edit-height').value);
-    const steps = parseInt(document.getElementById('edit-steps').value);
-    const cfgScale = parseFloat(document.getElementById('edit-cfg-scale').value);
-    const batchCount = parseInt(document.getElementById('edit-batch-count').value);
-    const seed = parseInt(document.getElementById('edit-seed').value);
+    const prompt = document.querySelector('#edit-form-container .input-prompt').value.trim();
+    const negativePrompt = document.querySelector('#edit-form-container .input-negative-prompt').value.trim();
+    const width = parseInt(document.querySelector('#edit-form-container .input-width').value);
+    const height = parseInt(document.querySelector('#edit-form-container .input-height').value);
+    const steps = parseInt(document.querySelector('#edit-form-container .input-steps').value);
+    const cfgScale = parseFloat(document.querySelector('#edit-form-container .input-cfg-scale').value);
+    const batchCount = parseInt(document.querySelector('#edit-form-container .input-batch-count').value);
+    const seed = parseInt(document.querySelector('#edit-form-container .input-seed').value);
 
     // Selected Models
-    const modelCheckedElements = document.querySelectorAll('input[name="edit-model"]:checked');
+    const modelCheckedElements = document.querySelectorAll('#edit-form-container input[name="model"]:checked');
     const selectedModels = Array.from(modelCheckedElements).map(el => el.value);
     
     if (selectedModels.length === 0) {
@@ -1355,7 +1286,7 @@ async function saveQueueItemUpdate() {
 
     // Selected LoRAs
     const selectedLoras = [];
-    const loraRows = document.querySelectorAll('#edit-loras-list-container .lora-item-row.active');
+    const loraRows = document.querySelectorAll('#edit-form-container .lora-item-row.active');
     loraRows.forEach(row => {
         const checkbox = row.querySelector('input[name="edit-lora-enable"]');
         const slider = row.querySelector('.lora-weight-slider');
@@ -1378,9 +1309,9 @@ async function saveQueueItemUpdate() {
         loras: selectedLoras,
         batch_count: batchCount,
         seed,
-        auto_upload: document.getElementById('edit-auto-upload')?.checked || false,
+        auto_upload: document.querySelector('#edit-form-container .input-auto-upload')?.checked || false,
         init_image: refImageBase64.edit || null,
-        denoising_strength: refImageBase64.edit ? parseFloat(document.getElementById('edit-denoising-strength').value) : 0.6
+        denoising_strength: refImageBase64.edit ? parseFloat(document.querySelector('#edit-form-container .input-denoising-strength').value) : 0.6
     };
 
     try {
@@ -1421,28 +1352,7 @@ function setupEventListeners() {
         taskForm.addEventListener('change', saveParamsToLocalStorage);
     }
     
-    // Aspect ratio selection
-    try {
-        const ratioButtons = document.querySelectorAll('#task-form .btn-ratio');
-        ratioButtons.forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                ratioButtons.forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                sizeState.ratio = btn.getAttribute('data-ratio');
-                updateDimensions();
-            });
-        });
-    } catch (err) {
-        console.error("Error setting up ratio buttons:", err);
-    }
 
-
-
-    // Size slider input
-    safeAddListener('size-slider', 'input', (e) => {
-        sizeState.size = parseInt(e.target.value);
-        updateDimensions();
-    });
 
     // Control bar
     safeAddListener('btn-toggle-queue', 'click', toggleQueue);
@@ -1461,26 +1371,7 @@ function setupEventListeners() {
     safeAddListener('btn-cancel-edit', 'click', () => toggleModal('edit-modal', false));
     safeAddListener('btn-save-edit', 'click', saveQueueItemUpdate);
 
-    // Edit Size slider input
-    safeAddListener('edit-size-slider', 'input', (e) => {
-        editSizeState.size = parseInt(e.target.value);
-        updateEditDimensions();
-    });
 
-    // Edit ratio buttons
-    try {
-        const editRatioButtons = document.querySelectorAll('#edit-aspect-ratio-selector .btn-ratio');
-        editRatioButtons.forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                editRatioButtons.forEach(b => b.classList.remove('active'));
-                btn.classList.add('active');
-                editSizeState.ratio = btn.getAttribute('data-ratio');
-                updateEditDimensions();
-            });
-        });
-    } catch (err) {
-        console.error("Error setting up edit ratio buttons:", err);
-    }
     
     // Click outside to close modals
     window.addEventListener('click', (e) => {
