@@ -124,7 +124,7 @@ function loadRefImageFile(file, ctx) {
             // Auto-select the closest ratio button for this context
             // Only update ratio if we are in 'create' context, edit context doesn't have a simple ratio selector
             if (ctx === 'create') {
-                const ratioBtns = document.querySelectorAll('.btn-ratio');
+                const ratioBtns = document.querySelectorAll('#task-form .btn-ratio');
                 ratioBtns.forEach(btn => {
                     if (btn.getAttribute('data-ratio') === closestRatio) {
                         btn.click();
@@ -237,7 +237,7 @@ function setSizeStateFromDimensions(w, h) {
     sizeState.size = size;
     
     // Update active class on ratio buttons
-    const ratioButtons = document.querySelectorAll('.btn-ratio');
+    const ratioButtons = document.querySelectorAll('#task-form .btn-ratio');
     ratioButtons.forEach(btn => {
         if (btn.getAttribute('data-ratio') === ratio) btn.classList.add('active');
         else btn.classList.remove('active');
@@ -326,7 +326,7 @@ function restoreParamsFromLocalStorage() {
         if (params.size) sizeState.size = params.size;
         
         // Update active ratio buttons
-        const ratioButtons = document.querySelectorAll('.btn-ratio');
+        const ratioButtons = document.querySelectorAll('#task-form .btn-ratio');
         ratioButtons.forEach(btn => {
             if (btn.getAttribute('data-ratio') === sizeState.ratio) btn.classList.add('active');
             else btn.classList.remove('active');
@@ -1420,7 +1420,7 @@ function setupEventListeners() {
     
     // Aspect ratio selection
     try {
-        const ratioButtons = document.querySelectorAll('.btn-ratio');
+        const ratioButtons = document.querySelectorAll('#task-form .btn-ratio');
         ratioButtons.forEach(btn => {
             btn.addEventListener('click', (e) => {
                 ratioButtons.forEach(b => b.classList.remove('active'));
