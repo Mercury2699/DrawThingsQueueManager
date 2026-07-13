@@ -353,10 +353,11 @@ function saveParamsToLocalStorage() {
     try {
         const promptEl = document.querySelector('#create-form-container .input-prompt');
         const negEl = document.querySelector('#create-form-container .input-negative-prompt');
-        const stepsEl = document.getElementById('steps');
+        const stepsEl = document.querySelector('#create-form-container .input-steps');
         const cfgEl = document.querySelector('#create-form-container .input-cfg-scale');
         const batchEl = document.querySelector('#create-form-container .input-batch-count');
         const seedEl = document.querySelector('#create-form-container .input-seed');
+        const autoUploadEl = document.querySelector('#create-form-container .input-auto-upload');
         
         const params = {
             prompt: promptEl ? promptEl.value : '',
@@ -365,6 +366,7 @@ function saveParamsToLocalStorage() {
             cfg_scale: cfgEl ? parseFloat(cfgEl.value) : 1.0,
             batch_count: batchEl ? parseInt(batchEl.value) : 2,
             seed: seedEl ? parseInt(seedEl.value) : -1,
+            auto_upload: autoUploadEl ? autoUploadEl.checked : false,
             ratio: sizeState.ratio,
             size: sizeState.size,
             
@@ -418,6 +420,9 @@ function restoreParamsFromLocalStorage() {
         
         if (params.seed !== undefined && document.querySelector('#create-form-container .input-seed')) 
             document.querySelector('#create-form-container .input-seed').value = params.seed;
+            
+        if (params.auto_upload !== undefined && document.querySelector('#create-form-container .input-auto-upload'))
+            document.querySelector('#create-form-container .input-auto-upload').checked = params.auto_upload;
         
         if (params.ratio) sizeState.ratio = params.ratio;
         if (params.size) sizeState.size = params.size;
@@ -651,7 +656,7 @@ async function handleTaskFormSubmit(e) {
         loras: selectedLoras,
         batch_count: batchCount,
         seed,
-        auto_upload: document.getElementById('auto-upload')?.checked || false,
+        auto_upload: document.querySelector('#create-form-container .input-auto-upload')?.checked || false,
         init_image: refImageBase64.create || null,
         denoising_strength: refImageBase64.create ? parseFloat(document.querySelector('#create-form-container .input-denoising-strength').value) : 0.6
     };
