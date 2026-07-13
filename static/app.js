@@ -917,6 +917,18 @@ function openImageDetails(historyId) {
         toggleModal('image-modal', false);
     };
     
+    // Send to img2img action
+    const btnSendI2I = document.getElementById('btn-modal-send-i2i');
+    if (item.status === 'success' && item.filename && !item.civitai_url) {
+        btnSendI2I.classList.remove('hidden');
+        btnSendI2I.onclick = () => {
+            sendToImg2Img(item);
+            toggleModal('image-modal', false);
+        };
+    } else {
+        btnSendI2I.classList.add('hidden');
+    }
+    
     // File Link (only shown when file exists locally, hidden if uploaded to civitai)
     const btnOpenFolder = document.getElementById('btn-modal-open-folder');
     const btnCivitai = document.getElementById('btn-modal-civitai');
@@ -934,6 +946,35 @@ function openImageDetails(historyId) {
     }
     
     toggleModal('image-modal', true);
+}
+
+async function sendToImg2Img(item) {
+    try {
+        // Fetch the image to get base64
+        const response = await fetch(`/outputs/${item.filename}`);
+        const blob = await response.blob();
+        
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const base64data = reader.result;
+            // Update state
+            refImageBase64.create = base64data.split(',')[1];
+            
+            // Update UI for the reference image dropzone
+            document.getElementById('ref-image-thumb').src = base64data;
+            document.getElementById('dropzone-idle').classList.add('hidden');
+            document.getElementById('dropzone-preview').classList.remove('hidden');
+            document.getElementById('denoising-group').classList.remove('hidden');
+            
+            // Also copy the parameters to make it easy to start modifying
+            reuseParameters(item);
+            
+            showToast("Sent to img2img and parameters copied!");
+        };
+        reader.readAsDataURL(blob);
+    } catch (e) {
+        showToast("Failed to load image for img2img: " + e.message, true);
+    }
 }
 
 function reuseParameters(item) {
