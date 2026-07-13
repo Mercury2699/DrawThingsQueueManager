@@ -37,7 +37,10 @@ const API = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings)
-    }).then(r => r.json())
+    }).then(r => r.json()),
+    getStorage: () => fetch('/api/storage').then(r => r.json()),
+    cleanLocal: () => fetch('/api/storage/clean-local', { method: 'POST' }).then(r => r.json()),
+    vacuumDb: () => fetch('/api/storage/vacuum-db', { method: 'POST' }).then(r => r.json())
 };
 
 let state = {
@@ -1400,3 +1403,79 @@ function setupEventListeners() {
         if (e.target === editModal) toggleModal('edit-modal', false);
     });
 }
+// ============================================================================
+// STORAGE MANAGER LOGIC
+// ============================================================================
+let storageRefreshInterval = null;
+
+function formatBytes(bytes, decimals = 2) {
+    if (!+bytes) return '0 Bytes';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
+async function refreshStorageData() {
+    try {
+        const data = await API.getStorage();
+        document.getElementById('size-local-outputs').textContent = formatBytes(data.outputs_size_bytes);
+        document.getElementById('size-dt-db').textContent = formatBytes(data.db_size_bytes);
+        
+        const btnVacuum = document.getElementById('btn-vacuum-db');
+        const vacuumProgress = document.getElementById('vacuum-progress');
+        
+        if (data.vacuum_running) {
+            btnVacuum.classList.add('hidden');
+            vacuumProgress.classList.remove('hidden');
+        } else {
+            btnVacuum.classList.remove('hidden');
+            vacuumProgress.classList.add('hidden');
+        }
+    } catch (e) {
+        console.error("Failed to fetch storage stats", e);
+    }
+}
+
+document.getElementById('btn-storage').addEventListener('click', () => {
+    toggleModal('storage-modal', true);
+    refreshStorageData();
+    storageRefreshInterval = setInterval(refreshStorageData, 3000);
+});
+
+document.getElementById('btn-close-storage').addEventListener('click', () => {
+    toggleModal('storage-modal', false);
+    if (storageRefreshInterval) {
+        clearInterval(storageRefreshInterval);
+        storageRefreshInterval = null;
+    }
+});
+
+document.getElementById('btn-clean-local').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-clean-local');
+    btn.disabled = true;
+    btn.textContent = 'Cleaning...';
+    try {
+        const res = await API.cleanLocal();
+        showToast(`Cleared ${res.deleted_count} unused images from local folder.`);
+        await refreshStorageData();
+    } catch (e) {
+        showToast(`Failed to clean local storage: ${e.message}`, true);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Clean Local Outputs';
+    }
+});
+
+document.getElementById('btn-vacuum-db').addEventListener('click', async () => {
+    if (!confirm("Have you completely closed the Draw Things app? Vacuuming while it is running can corrupt the database.")) return;
+    
+    try {
+        await API.vacuumDb();
+        showToast("Vacuum started in the background. Do not close this window or start Draw Things yet.");
+        refreshStorageData();
+    } catch (e) {
+        showToast(`Failed to start vacuum: ${e.message}`, true);
+    }
+});

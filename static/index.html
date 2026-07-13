@@ -40,7 +40,10 @@
                         <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
                         Clear Finished
                     </button>
-                    <button id="btn-settings" class="btn btn-icon">
+                    <button id="btn-storage" class="btn btn-icon" title="Storage Manager">
+                        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+                    </button>
+                    <button id="btn-settings" class="btn btn-icon" title="Settings">
                         <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                     </button>
                 </div>
@@ -245,6 +248,49 @@
                 </div>
             </div>
         </section>
+    </div>
+
+    <!-- STORAGE MODAL -->
+    <div class="modal-backdrop hidden" id="storage-modal">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3>Storage Manager</h3>
+                <button class="btn-close" id="btn-close-storage">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="storage-section">
+                    <div class="storage-info">
+                        <h4>Local Outputs Folder</h4>
+                        <p>Contains local `.png` files that have not yet been deleted or uploaded.</p>
+                        <span class="storage-size" id="size-local-outputs">Calculating...</span>
+                    </div>
+                    <button class="btn btn-secondary" id="btn-clean-local">Clean Local Outputs</button>
+                </div>
+                
+                <hr class="settings-divider">
+                
+                <div class="storage-section">
+                    <div class="storage-info">
+                        <h4>Draw Things Internal Database</h4>
+                        <p>The SQLite database gets large over time because deleting images in the app doesn't automatically shrink the file.</p>
+                        <span class="storage-size" id="size-dt-db">Calculating...</span>
+                    </div>
+                    
+                    <div class="vacuum-warning">
+                        <strong>⚠️ IMPORTANT:</strong> You <u>MUST</u> close the Draw Things app completely before running the vacuumer to avoid database locks or corruption. This process will temporarily require free disk space equal to the database size and may take several minutes.
+                    </div>
+                    
+                    <button class="btn btn-danger" id="btn-vacuum-db">Vacuum Database</button>
+                    
+                    <div id="vacuum-progress" class="hidden" style="margin-top: 12px; font-size: 13px; color: var(--accent-cyan); display: flex; align-items: center; gap: 8px;">
+                        <svg class="spinner" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-dashoffset="16" stroke-linecap="round"></circle></svg>
+                        Vacuuming in progress, please do not close the window...
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- SETTINGS MODAL -->

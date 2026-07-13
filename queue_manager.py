@@ -24,6 +24,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+import subprocess
+
+vacuum_is_running = False
 
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
@@ -872,6 +875,70 @@ def post_control(ctrl: ControlAction):
         return {"status": "cleared all"}
     else:
         raise HTTPException(status_code=400, detail="Invalid action")
+
+# ==============================================================================
+# Storage Cleaner Operations
+# ==============================================================================
+
+def get_dir_size(path):
+    total = 0
+    if os.path.exists(path):
+        for dirpath, _, filenames in os.walk(path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                if not os.path.islink(fp):
+                    total += os.path.getsize(fp)
+    return total
+
+DRAW_THINGS_DB_PATH = os.path.expanduser("~/Library/Containers/com.liuliu.draw-things/Data/Documents/Untitled-61466.sqlite3")
+
+@app.get("/api/storage")
+def get_storage():
+    outputs_size = get_dir_size(OUTPUT_DIR)
+    db_size = os.path.getsize(DRAW_THINGS_DB_PATH) if os.path.exists(DRAW_THINGS_DB_PATH) else 0
+    
+    return {
+        "outputs_size_bytes": outputs_size,
+        "db_size_bytes": db_size,
+        "vacuum_running": vacuum_is_running
+    }
+
+@app.post("/api/storage/clean-local")
+def clean_local_storage():
+    count = 0
+    if os.path.exists(OUTPUT_DIR):
+        for f in os.listdir(OUTPUT_DIR):
+            if f.endswith(".png"):
+                try:
+                    os.remove(os.path.join(OUTPUT_DIR, f))
+                    count += 1
+                except Exception as e:
+                    print(f"Error removing {f}: {e}")
+    return {"status": "success", "deleted_count": count}
+
+def run_vacuum_task():
+    global vacuum_is_running
+    vacuum_is_running = True
+    try:
+        print("Starting SQLite VACUUM on Draw Things database...")
+        subprocess.run(["sqlite3", DRAW_THINGS_DB_PATH, "VACUUM;"], check=True)
+        print("SQLite VACUUM completed successfully.")
+    except Exception as e:
+        print(f"SQLite VACUUM failed: {e}")
+    finally:
+        vacuum_is_running = False
+
+@app.post("/api/storage/vacuum-db")
+def vacuum_db(background_tasks: BackgroundTasks):
+    global vacuum_is_running
+    if vacuum_is_running:
+        raise HTTPException(status_code=400, detail="A vacuum operation is already running")
+    
+    if not os.path.exists(DRAW_THINGS_DB_PATH):
+        raise HTTPException(status_code=404, detail="Draw Things database not found")
+        
+    background_tasks.add_task(run_vacuum_task)
+    return {"status": "success", "message": "Vacuum started in background"}
 
 # Settings operations
 @app.get("/api/settings")
