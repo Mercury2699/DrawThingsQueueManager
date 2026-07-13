@@ -50,6 +50,8 @@ body {
     font-family: var(--font-sans);
     line-height: 1.5;
     min-height: 100vh;
+    overflow-x: hidden;
+    width: 100vw;
 }
 
 .app-container {
@@ -216,14 +218,17 @@ body {
 .prompt-row {
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
     gap: 6px;
+    width: 100%;
 }
 
 .prompt-row #active-prompt {
     font-size: 13.5px;
     line-height: 1.5;
     word-break: break-all;
+    overflow-wrap: break-word;
+    white-space: pre-wrap;
     color: var(--text-main);
     background: rgba(0, 0, 0, 0.2);
     border: 1px solid var(--border-color);
@@ -232,6 +237,7 @@ body {
     width: 100%;
     max-height: 120px;
     overflow-y: auto;
+    display: block;
 }
 
 .task-metadata-grid {
@@ -309,6 +315,14 @@ body {
     border-radius: var(--radius-md);
     padding: 24px;
     box-shadow: var(--shadow-md);
+    min-width: 0;
+    width: 100%;
+}
+
+@media (max-width: 768px) {
+    .panel {
+        padding: 16px;
+    }
 }
 
 .creator-panel h2, .queue-panel h2, .gallery-panel h2 {
