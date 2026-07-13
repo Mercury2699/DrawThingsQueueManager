@@ -1283,6 +1283,9 @@ function openEditModal(itemId) {
     document.getElementById('edit-batch-count').value = item.batch_count || 2;
     document.getElementById('edit-seed').value = item.seed;
     
+    const autoUploadEl = document.getElementById('edit-auto-upload');
+    if (autoUploadEl) autoUploadEl.checked = !!item.auto_upload;
+    
     // Dynamically populate models & loras lists for the edit modal
     populateEditModelsAndLoras();
     
