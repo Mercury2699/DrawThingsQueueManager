@@ -40,6 +40,11 @@
     padding: 0;
 }
 
+html, body {
+    overflow-x: hidden;
+    width: 100%;
+}
+
 body {
     background-color: var(--bg-base);
     background-image: 
@@ -50,8 +55,6 @@ body {
     font-family: var(--font-sans);
     line-height: 1.5;
     min-height: 100vh;
-    overflow-x: hidden;
-    width: 100vw;
 }
 
 .app-container {
@@ -100,6 +103,7 @@ body {
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
     box-shadow: var(--shadow-sm);
+    min-width: 0;
 }
 
 .logo-area {
@@ -166,6 +170,7 @@ body {
     border-radius: var(--radius-md);
     padding: 20px;
     box-shadow: var(--shadow-md);
+    min-width: 0;
 }
 
 .panel-header {
