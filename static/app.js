@@ -376,7 +376,7 @@ function saveParamsToLocalStorage() {
             models: Array.from(document.querySelectorAll('#create-form-container input[name="model"]:checked')).map(el => el.value),
             
             // LoRAs selection
-            loras: Array.from(document.querySelectorAll('.lora-item-row.active')).map(row => {
+            loras: Array.from(document.querySelectorAll('#create-form-container .lora-item-row.active')).map(row => {
                 const cb = row.querySelector('input[name="lora-enable"]');
                 const slider = row.querySelector('.lora-weight-slider');
                 return {
@@ -409,7 +409,7 @@ function restoreParamsFromLocalStorage() {
             document.querySelector('#create-form-container .input-prompt').value = params.prompt;
         if (params.negative_prompt !== undefined && document.querySelector('#create-form-container .input-negative-prompt')) 
             document.querySelector('#create-form-container .input-negative-prompt').value = params.negative_prompt;
-        if (params.steps !== undefined && document.getElementById('steps')) 
+        if (params.steps !== undefined && document.querySelector('#create-form-container .input-steps')) 
             document.querySelector('#create-form-container .input-steps').value = params.steps;
         if (params.cfg_scale !== undefined && document.querySelector('#create-form-container .input-cfg-scale')) 
             document.querySelector('#create-form-container .input-cfg-scale').value = params.cfg_scale;
@@ -443,7 +443,7 @@ function restoreParamsFromLocalStorage() {
         
         // Restore models checkmarks
         if (params.models && Array.isArray(params.models)) {
-            const modelCheckboxes = document.querySelectorAll('input[name="model"]');
+            const modelCheckboxes = document.querySelectorAll('#create-form-container input[name="model"]');
             modelCheckboxes.forEach(cb => {
                 cb.checked = params.models.includes(cb.value);
             });
@@ -453,7 +453,7 @@ function restoreParamsFromLocalStorage() {
         if (params.loras && Array.isArray(params.loras)) {
             params.loras.forEach(savedLora => {
                 const cleaned = cleanId(savedLora.file);
-                const row = document.getElementById(`lora-row-${cleaned}`);
+                const row = document.querySelector(`#create-form-container .lora-item-row[data-id="${cleaned}"]`);
                 if (row) {
                     const cb = row.querySelector('input[name="lora-enable"]');
                     const slider = row.querySelector('.lora-weight-slider');
@@ -632,7 +632,7 @@ async function handleTaskFormSubmit(e) {
 
     // Selected LoRAs
     const selectedLoras = [];
-    const loraRows = document.querySelectorAll('.lora-item-row.active');
+    const loraRows = document.querySelectorAll('#create-form-container .lora-item-row.active');
     loraRows.forEach(row => {
         const checkbox = row.querySelector('input[name="lora-enable"]');
         const slider = row.querySelector('.lora-weight-slider');
@@ -1127,13 +1127,13 @@ function reuseParameters(item) {
     setSizeStateFromDimensions(item.width, item.height);
     
     // Select base model
-    const modelCheckboxes = document.querySelectorAll('input[name="model"]');
+    const modelCheckboxes = document.querySelectorAll('#create-form-container input[name="model"]');
     modelCheckboxes.forEach(cb => {
         cb.checked = (cb.value === item.model);
     });
     
     // Reset and select LoRAs
-    const loraRows = document.querySelectorAll('.lora-item-row');
+    const loraRows = document.querySelectorAll('#create-form-container .lora-item-row');
     loraRows.forEach(row => {
         row.classList.remove('active');
         const cb = row.querySelector('input[name="lora-enable"]');
