@@ -392,12 +392,42 @@ class QueueWorker:
         # Determine endpoint and build payload
         is_i2i = bool(init_image)
         if is_i2i:
+            # Draw Things API strictly requires init_images dimensions to match width and height
+            try:
+                img_data = base64.b64decode(init_image)
+                img = Image.open(BytesIO(img_data))
+                
+                # Crop to aspect ratio then resize
+                target_ratio = width / height
+                img_ratio = img.width / img.height
+                
+                if abs(target_ratio - img_ratio) > 0.01:
+                    if img_ratio > target_ratio:
+                        new_width = int(img.height * target_ratio)
+                        offset = (img.width - new_width) // 2
+                        crop_box = (offset, 0, offset + new_width, img.height)
+                    else:
+                        new_height = int(img.width / target_ratio)
+                        offset = (img.height - new_height) // 2
+                        crop_box = (0, offset, img.width, offset + new_height)
+                    img = img.crop(crop_box)
+                
+                if img.width != width or img.height != height:
+                    img = img.resize((width, height), Image.Resampling.LANCZOS)
+                
+                buffered = BytesIO()
+                img.save(buffered, format="PNG")
+                init_image_resized = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            except Exception as e:
+                print(f"  -> Error resizing init_image: {e}")
+                init_image_resized = init_image
+
             # Swap txt2img endpoint for img2img
             endpoint = api_endpoint.replace("/txt2img", "/img2img")
             payload = {
                 "prompt": prompt,
                 "negative_prompt": negative_prompt,
-                "init_images": [init_image],
+                "init_images": [init_image_resized],
                 "denoising_strength": denoising_strength,
                 "seed": seed,
                 "steps": steps,
