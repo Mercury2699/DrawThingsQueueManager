@@ -305,37 +305,33 @@ function updateDimensions(ctx = 'create') {
 }
 
 function setSizeStateFromDimensions(w, h, ctx = 'create') {
-    const predefinedSizes = [
-        { ratio: '1:1', size: 1024, width: 1024, height: 1024 },
-        { ratio: '3:2', size: 1024, width: 1024, height: 672 },
-        { ratio: '4:3', size: 1024, width: 1024, height: 768 },
-        { ratio: '16:9', size: 1024, width: 1024, height: 576 },
-        { ratio: '2:3', size: 1024, width: 672, height: 1024 },
-        { ratio: '3:4', size: 1024, width: 768, height: 1024 },
-        { ratio: '9:16', size: 1024, width: 576, height: 1024 },
-        { ratio: '1:1', size: 512, width: 512, height: 512 },
-        { ratio: '3:2', size: 512, width: 512, height: 352 },
-        { ratio: '4:3', size: 512, width: 512, height: 384 },
-        { ratio: '16:9', size: 512, width: 512, height: 288 },
-        { ratio: '2:3', size: 512, width: 352, height: 512 },
-        { ratio: '3:4', size: 512, width: 384, height: 512 },
-        { ratio: '9:16', size: 512, width: 288, height: 512 },
-    ];
-    
     const stateObj = ctx === 'create' ? sizeState : editSizeState;
     const container = ctx === 'create' ? document.getElementById('create-form-container') : document.getElementById('edit-form-container');
     if (!container) return;
     
-    let matchedRatio = '1:1';
-    let matchedSize = 1024;
+    let actualRatio = w / h;
+    const knownRatios = {
+        '1:1': 1,
+        '3:2': 1.5,
+        '4:3': 1.3333,
+        '16:9': 1.7777,
+        '2:3': 0.6666,
+        '3:4': 0.75,
+        '9:16': 0.5625
+    };
     
-    for (const ps of predefinedSizes) {
-        if (ps.width === w && ps.height === h) {
-            matchedRatio = ps.ratio;
-            matchedSize = ps.size;
-            break;
+    let matchedRatio = '1:1';
+    let minDiff = Infinity;
+    
+    for (const [rStr, rVal] of Object.entries(knownRatios)) {
+        const diff = Math.abs(actualRatio - rVal);
+        if (diff < minDiff) {
+            minDiff = diff;
+            matchedRatio = rStr;
         }
     }
+    
+    let matchedSize = Math.max(w, h);
     
     stateObj.ratio = matchedRatio;
     stateObj.size = matchedSize;
@@ -1307,7 +1303,7 @@ async function saveQueueItemUpdate() {
     const selectedLoras = [];
     const loraRows = document.querySelectorAll('#edit-form-container .lora-item-row.active');
     loraRows.forEach(row => {
-        const checkbox = row.querySelector('input[name="edit-lora-enable"]');
+        const checkbox = row.querySelector('input[name="lora-enable"]');
         const slider = row.querySelector('.lora-weight-slider');
         if (checkbox && slider && checkbox.checked) {
             selectedLoras.push({
