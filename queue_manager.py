@@ -511,8 +511,8 @@ class QueueWorker:
         # Save base64 image to file
         try:
             img_data = base64.b64decode(response_data["images"][0])
-            img = Image.open(BytesIO(img_data))
-            img.save(filepath)
+            with open(filepath, "wb") as f:
+                f.write(img_data)
 
             # Insert history success
             conn = get_db()
