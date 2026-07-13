@@ -88,12 +88,51 @@ function loadRefImageFile(file, ctx) {
         const dataUrl = ev.target.result;
         // Strip the data:image/...;base64, prefix — store raw base64
         refImageBase64[ctx] = dataUrl.split(',')[1];
-        // Show thumbnail
+        
+        // Show thumbnail and hide idle text
         const prefix = ctx === 'edit' ? 'edit-' : '';
         document.getElementById(`${prefix}ref-image-thumb`).src = dataUrl;
-        document.getElementById(`${prefix}dropzone-idle`).classList.add('hidden');
+        document.getElementById(`${prefix}dropzone-idle`).style.display = 'none';
         document.getElementById(`${prefix}dropzone-preview`).classList.remove('hidden');
+        document.getElementById(`${prefix}dropzone-preview`).style.display = 'block';
         document.getElementById(`${prefix}denoising-group`).classList.remove('hidden');
+        
+        // Auto-detect aspect ratio
+        const img = new Image();
+        img.onload = () => {
+            const ratios = {
+                '16:9': 16/9,
+                '3:2': 3/2,
+                '4:3': 4/3,
+                '1:1': 1,
+                '3:4': 3/4,
+                '2:3': 2/3,
+                '9:16': 9/16
+            };
+            const imgRatio = img.width / img.height;
+            let closestRatio = '1:1';
+            let minDiff = Infinity;
+            
+            for (const [key, val] of Object.entries(ratios)) {
+                const diff = Math.abs(imgRatio - val);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closestRatio = key;
+                }
+            }
+            
+            // Auto-select the closest ratio button for this context
+            // Only update ratio if we are in 'create' context, edit context doesn't have a simple ratio selector
+            if (ctx === 'create') {
+                const ratioBtns = document.querySelectorAll('.btn-ratio');
+                ratioBtns.forEach(btn => {
+                    if (btn.getAttribute('data-ratio') === closestRatio) {
+                        btn.click();
+                    }
+                });
+            }
+        };
+        img.src = dataUrl;
     };
     reader.readAsDataURL(file);
 }
@@ -102,9 +141,15 @@ function clearRefImage(ctx, event) {
     refImageBase64[ctx] = null;
     const prefix = ctx === 'edit' ? 'edit-' : '';
     document.getElementById(`${prefix}ref-image-thumb`).src = '';
+    
     document.getElementById(`${prefix}dropzone-idle`).classList.remove('hidden');
+    document.getElementById(`${prefix}dropzone-idle`).style.display = ''; // Reset display style
+    
     document.getElementById(`${prefix}dropzone-preview`).classList.add('hidden');
+    document.getElementById(`${prefix}dropzone-preview`).style.display = 'none';
+    
     document.getElementById(`${prefix}denoising-group`).classList.add('hidden');
+    
     if (ctx === 'create') {
         document.getElementById('ref-image-input').value = '';
     } else {
