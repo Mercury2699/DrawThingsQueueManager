@@ -240,6 +240,11 @@ body {
     display: block;
 }
 
+#active-model {
+    word-break: break-all;
+    white-space: normal;
+}
+
 .task-metadata-grid {
     display: grid;
     grid-template-columns: 2.2fr 1.2fr 1fr;
@@ -718,6 +723,8 @@ textarea:focus, input[type="text"]:focus, input[type="number"]:focus, select:foc
     border-radius: 4px;
     font-size: 11px;
     color: var(--text-muted);
+    word-break: break-all;
+    white-space: normal;
 }
 
 .queue-meta-info {
@@ -732,7 +739,7 @@ textarea:focus, input[type="text"]:focus, input[type="number"]:focus, select:foc
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    word-break: break-all;
+    white-space: nowrap;
     display: inline-block;
 }
 
