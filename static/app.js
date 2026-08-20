@@ -5,6 +5,7 @@ const API = {
     getModels: () => fetch('/api/models').then(r => r.json()),
     getQueue: () => fetch('/api/queue').then(r => r.json()),
     getHistory: () => fetch('/api/history').then(r => r.json()),
+    getLatestSuccess: () => fetch('/api/queue/latest-success').then(r => r.json()),
     getStatus: () => fetch('/api/status').then(r => r.json()),
     control: (action) => fetch('/api/control', {
         method: 'POST',
@@ -115,7 +116,10 @@ function setupFormListeners(container, ctx) {
         dropzone.addEventListener('dragover', handleRefImageDragOver);
         dropzone.addEventListener('dragleave', handleRefImageDragLeave);
         dropzone.addEventListener('drop', (e) => handleRefImageDrop(e, ctx));
-        dropzone.addEventListener('click', () => refImageInput.click());
+        dropzone.addEventListener('click', (e) => {
+            if (e.target.closest('.btn-remove-ref')) return;
+            refImageInput.click();
+        });
     }
     
     if (refImageInput) {
@@ -166,23 +170,29 @@ function loadRefImageFile(file, ctx) {
         const container = ctx === 'create' ? document.getElementById('create-form-container') : document.getElementById('edit-form-container');
         if (!container) return;
         
+        const dropzone = container.querySelector('.container-ref-dropzone');
+        if (dropzone) dropzone.classList.add('has-image');
+        
         // Show thumbnail and hide idle text
         const thumb = container.querySelector('.ref-image-thumb');
         if (thumb) thumb.src = dataUrl;
         
         const idle = container.querySelector('.dropzone-idle');
-        if (idle) idle.style.display = 'none';
+        if (idle) {
+            idle.classList.add('hidden');
+            idle.style.display = 'none';
+        }
         
         const preview = container.querySelector('.dropzone-preview');
         if (preview) {
             preview.classList.remove('hidden');
-            preview.style.display = 'block';
+            preview.style.display = 'flex';
         }
         
         const group = container.querySelector('.denoising-group');
         if (group) group.classList.remove('hidden');
         
-        // Auto-detect aspect ratio
+        // Auto-detect aspect ratio & display resolution badge
         const img = new Image();
         img.onload = () => {
             const ratios = {
@@ -206,9 +216,21 @@ function loadRefImageFile(file, ctx) {
                 }
             }
             
+            const infoBadge = container.querySelector('.ref-image-info-badge');
+            if (infoBadge) {
+                infoBadge.textContent = `${img.naturalWidth || img.width} × ${img.naturalHeight || img.height} (${closestRatio})`;
+            }
+            
             // Auto-select the closest ratio button for this context
             if (ctx === 'create') {
                 const ratioBtns = document.querySelectorAll('#create-form-container .btn-ratio');
+                ratioBtns.forEach(btn => {
+                    if (btn.getAttribute('data-ratio') === closestRatio) {
+                        btn.click();
+                    }
+                });
+            } else if (ctx === 'edit') {
+                const ratioBtns = document.querySelectorAll('#edit-form-container .btn-ratio');
                 ratioBtns.forEach(btn => {
                     if (btn.getAttribute('data-ratio') === closestRatio) {
                         btn.click();
@@ -227,6 +249,9 @@ function clearRefImage(ctx, event) {
     
     const container = ctx === 'create' ? document.getElementById('create-form-container') : document.getElementById('edit-form-container');
     if (!container) return;
+    
+    const dropzone = container.querySelector('.container-ref-dropzone');
+    if (dropzone) dropzone.classList.remove('has-image');
     
     const thumb = container.querySelector('.ref-image-thumb');
     if (thumb) thumb.src = '';
@@ -248,6 +273,9 @@ function clearRefImage(ctx, event) {
     
     const input = container.querySelector('.input-ref-image');
     if (input) input.value = '';
+    
+    const infoBadge = container.querySelector('.ref-image-info-badge');
+    if (infoBadge) infoBadge.textContent = '';
 }
 
 
@@ -389,24 +417,36 @@ function saveParamsToLocalStorage() {
     }
 }
 
-function restoreParamsFromLocalStorage() {
+async function restoreOrLoadLastParams() {
     try {
-        const dataStr = localStorage.getItem('dt_queue_params');
-        if (!dataStr) {
+        let params = null;
+        
+        // Try fetching from server first
+        try {
+            const serverParams = await API.getLatestSuccess();
+            if (serverParams && Object.keys(serverParams).length > 0) {
+                params = serverParams;
+            }
+        } catch(e) {
+            console.error("Failed to fetch latest success params:", e);
+        }
+        
+        // Fallback to local storage if server has no successful items
+        if (!params) {
+            const dataStr = localStorage.getItem('dt_queue_params');
+            if (dataStr) {
+                params = JSON.parse(dataStr);
+            }
+        }
+        
+        if (!params) {
             // Default batch count to 2 if no history settings
             const batchEl = document.querySelector('#create-form-container .input-batch-count');
             if (batchEl) batchEl.value = 2;
             return;
         }
         
-        const params = JSON.parse(dataStr);
-        if (!params) return;
-        
         // Restore values
-        if (params.prompt !== undefined && document.querySelector('#create-form-container .input-prompt')) 
-            document.querySelector('#create-form-container .input-prompt').value = params.prompt;
-        if (params.negative_prompt !== undefined && document.querySelector('#create-form-container .input-negative-prompt')) 
-            document.querySelector('#create-form-container .input-negative-prompt').value = params.negative_prompt;
         if (params.steps !== undefined && document.querySelector('#create-form-container .input-steps')) 
             document.querySelector('#create-form-container .input-steps').value = params.steps;
         if (params.cfg_scale !== undefined && document.querySelector('#create-form-container .input-cfg-scale')) 
@@ -424,23 +464,27 @@ function restoreParamsFromLocalStorage() {
         if (params.auto_upload !== undefined && document.querySelector('#create-form-container .input-auto-upload'))
             document.querySelector('#create-form-container .input-auto-upload').checked = params.auto_upload;
         
-        if (params.ratio) sizeState.ratio = params.ratio;
-        if (params.size) sizeState.size = params.size;
-        
-        // Update active ratio buttons
-        const ratioButtons = document.querySelectorAll('#create-form-container .btn-ratio');
-        ratioButtons.forEach(btn => {
-            if (btn.getAttribute('data-ratio') === sizeState.ratio) btn.classList.add('active');
-            else btn.classList.remove('active');
-        });
-        
-        // Update size slider
-        const sizeSlider = document.querySelector('#create-form-container .input-size-slider');
-        if (sizeSlider && params.size) {
-            sizeSlider.value = params.size;
+        if (params.width && params.height) {
+            setSizeStateFromDimensions(params.width, params.height, 'create');
+        } else {
+            if (params.ratio) sizeState.ratio = params.ratio;
+            if (params.size) sizeState.size = params.size;
+            
+            // Update active ratio buttons
+            const ratioButtons = document.querySelectorAll('#create-form-container .btn-ratio');
+            ratioButtons.forEach(btn => {
+                if (btn.getAttribute('data-ratio') === sizeState.ratio) btn.classList.add('active');
+                else btn.classList.remove('active');
+            });
+            
+            // Update size slider
+            const sizeSlider = document.querySelector('#create-form-container .input-size-slider');
+            if (sizeSlider && params.size) {
+                sizeSlider.value = params.size;
+            }
+            
+            updateDimensions();
         }
-        
-        updateDimensions();
         
         // Restore models checkmarks
         if (params.models && Array.isArray(params.models)) {
@@ -470,7 +514,7 @@ function restoreParamsFromLocalStorage() {
             });
         }
     } catch (e) {
-        console.error("Error restoring parameters from localStorage:", e);
+        console.error("Error restoring parameters from server/localStorage:", e);
     }
 }
 
@@ -489,7 +533,7 @@ async function initApp() {
     try {
         await loadSettings();
         await loadModels();
-        restoreParamsFromLocalStorage(); // Restore from localStorage
+        await restoreOrLoadLastParams(); // Restore from server or localStorage
         await refreshQueue();
         await refreshHistory();
     } catch (e) {
@@ -865,6 +909,8 @@ async function pollStatus() {
     const toggleText = document.getElementById('btn-toggle-text');
     const playIcon = toggleBtn.querySelector('.icon-play');
     const pauseIcon = toggleBtn.querySelector('.icon-pause');
+    const pauseAfterBtn = document.getElementById('btn-pause-after');
+    const pauseAfterText = document.getElementById('btn-pause-after-text');
     
     try {
         const data = await API.getStatus();
@@ -881,12 +927,23 @@ async function pollStatus() {
             playIcon.classList.add('hidden');
             pauseIcon.classList.remove('hidden');
             dot.classList.add('processing');
+            
+            // Show pause-after button when running
+            pauseAfterBtn.classList.remove('hidden');
+            if (data.pause_after_current) {
+                pauseAfterBtn.className = 'btn btn-warning';
+                pauseAfterText.innerText = 'Cancel Scheduled Pause';
+            } else {
+                pauseAfterBtn.className = 'btn btn-secondary';
+                pauseAfterText.innerText = 'Pause After Task';
+            }
         } else {
             toggleBtn.className = "btn btn-primary";
             toggleText.innerText = "Resume Queue";
             playIcon.classList.remove('hidden');
             pauseIcon.classList.add('hidden');
             dot.classList.remove('processing');
+            pauseAfterBtn.classList.add('hidden');
         }
         
         // 3. Active Task details
@@ -942,6 +999,17 @@ async function toggleQueue() {
         showToast(action === 'start' ? "Queue loop started!" : "Queue loop paused.");
     } catch (e) {
         showToast("Error toggling queue status", true);
+    }
+}
+
+async function pauseAfterTask() {
+    const action = state.status.pause_after_current ? "cancel_pause_after" : "pause_after_current";
+    try {
+        await API.control(action);
+        await pollStatus();
+        showToast(action === 'pause_after_current' ? "Will pause after current task finishes." : "Scheduled pause cancelled.");
+    } catch (e) {
+        showToast("Error toggling pause-after-task", true);
     }
 }
 
@@ -1099,11 +1167,37 @@ async function sendToImg2Img(item) {
             // Update state
             refImageBase64.create = base64data.split(',')[1];
             
-            // Update UI for the reference image dropzone
-            container.querySelector('.ref-image-thumb').src = base64data;
-            container.querySelector('.dropzone-idle').classList.add('hidden');
-            container.querySelector('.dropzone-preview').classList.remove('hidden');
-            container.querySelector('.denoising-group').classList.remove('hidden');
+            const container = document.getElementById('create-form-container');
+            if (container) {
+                const dropzone = container.querySelector('.container-ref-dropzone');
+                if (dropzone) dropzone.classList.add('has-image');
+                
+                const thumb = container.querySelector('.ref-image-thumb');
+                if (thumb) {
+                    thumb.src = base64data;
+                    thumb.onload = () => {
+                        const infoBadge = container.querySelector('.ref-image-info-badge');
+                        if (infoBadge && thumb.naturalWidth) {
+                            infoBadge.textContent = `${thumb.naturalWidth} × ${thumb.naturalHeight}`;
+                        }
+                    };
+                }
+                
+                const idle = container.querySelector('.dropzone-idle');
+                if (idle) {
+                    idle.classList.add('hidden');
+                    idle.style.display = 'none';
+                }
+                
+                const preview = container.querySelector('.dropzone-preview');
+                if (preview) {
+                    preview.classList.remove('hidden');
+                    preview.style.display = 'flex';
+                }
+                
+                const group = container.querySelector('.denoising-group');
+                if (group) group.classList.remove('hidden');
+            }
             
             // Also copy the parameters to make it easy to start modifying
             reuseParameters(item);
@@ -1270,12 +1364,43 @@ function openEditModal(itemId) {
     // Restore reference image if present
     if (item.init_image) {
         refImageBase64.edit = item.init_image;
-        document.querySelector('#edit-form-container .ref-image-thumb').src = 'data:image/png;base64,' + item.init_image;
-        document.querySelector('#edit-form-container .dropzone-idle').classList.add('hidden');
-        document.querySelector('#edit-form-container .dropzone-preview').classList.remove('hidden');
-        document.querySelector('#edit-form-container .denoising-group').classList.remove('hidden');
-        document.querySelector('#edit-form-container .input-denoising-strength').value = item.denoising_strength || 0.6;
-        document.querySelector('#edit-form-container .denoising-value-display').textContent = parseFloat(item.denoising_strength || 0.6).toFixed(2);
+        const container = document.getElementById('edit-form-container');
+        if (container) {
+            const dropzone = container.querySelector('.container-ref-dropzone');
+            if (dropzone) dropzone.classList.add('has-image');
+            
+            const thumb = container.querySelector('.ref-image-thumb');
+            if (thumb) {
+                thumb.src = 'data:image/png;base64,' + item.init_image;
+                thumb.onload = () => {
+                    const infoBadge = container.querySelector('.ref-image-info-badge');
+                    if (infoBadge && thumb.naturalWidth) {
+                        infoBadge.textContent = `${thumb.naturalWidth} × ${thumb.naturalHeight}`;
+                    }
+                };
+            }
+            
+            const idle = container.querySelector('.dropzone-idle');
+            if (idle) {
+                idle.classList.add('hidden');
+                idle.style.display = 'none';
+            }
+            
+            const preview = container.querySelector('.dropzone-preview');
+            if (preview) {
+                preview.classList.remove('hidden');
+                preview.style.display = 'flex';
+            }
+            
+            const group = container.querySelector('.denoising-group');
+            if (group) group.classList.remove('hidden');
+            
+            const denoisingInput = container.querySelector('.input-denoising-strength');
+            if (denoisingInput) denoisingInput.value = item.denoising_strength || 0.6;
+            
+            const denoisingDisplay = container.querySelector('.denoising-value-display');
+            if (denoisingDisplay) denoisingDisplay.textContent = parseFloat(item.denoising_strength || 0.6).toFixed(2);
+        }
     } else {
         clearRefImage('edit', { stopPropagation: () => {} });
     }
@@ -1376,6 +1501,7 @@ function setupEventListeners() {
 
     // Control bar
     safeAddListener('btn-toggle-queue', 'click', toggleQueue);
+    safeAddListener('btn-pause-after', 'click', pauseAfterTask);
     safeAddListener('btn-clear-completed', 'click', clearCompleted);
     
     // Settings modal triggers

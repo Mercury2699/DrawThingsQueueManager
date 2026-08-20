@@ -6,6 +6,18 @@ __pycache__/
 venv/
 env/
 
+# Backup & Temp
+.git_backup/
+
+# Node & Test Scripts
+node_modules/
+package.json
+package-lock.json
+test*.js
+test*.py
+test_*.js
+test_*.py
+
 # SQLite database files
 *.db
 *.db-journal
@@ -24,4 +36,5 @@ cookies.json
 
 # Local model mapping (personalised per-user, not for repo)
 model_mapping.json
+
 
