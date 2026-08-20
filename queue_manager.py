@@ -174,6 +174,7 @@ class ReorderRequest(BaseModel):
 class QueueWorker:
     def __init__(self):
         self.running = False
+        self.pause_after_current = False
         self.current_task: Optional[Dict[str, Any]] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -183,6 +184,7 @@ class QueueWorker:
 
     def start(self):
         with self._lock:
+            self.pause_after_current = False
             if not self.running:
                 self.running = True
                 self.error_message = None
@@ -192,6 +194,15 @@ class QueueWorker:
     def pause(self):
         with self._lock:
             self.running = False
+            self.pause_after_current = False
+
+    def pause_after_this(self):
+        with self._lock:
+            self.pause_after_current = True
+
+    def cancel_pause_after(self):
+        with self._lock:
+            self.pause_after_current = False
 
     def _run_loop(self):
         while True:
@@ -366,6 +377,12 @@ class QueueWorker:
                         daemon=True
                     )
                     upload_thread.start()
+            
+            # Check if pause_after_current was requested
+            with self._lock:
+                if self.pause_after_current:
+                    self.running = False
+                    self.pause_after_current = False
             
             time.sleep(0.5)
             self.current_task = None
@@ -784,6 +801,57 @@ def add_to_queue(item: QueueItemCreate):
         
     return {"status": "success", "id": item_id}
 
+@app.get("/api/queue/latest-success")
+def get_latest_success():
+    conn = get_db()
+    cursor = conn.cursor()
+    # Query from history table since completed queue items may be cleared
+    cursor.execute("""
+        SELECT * FROM history
+        WHERE status = 'success'
+        ORDER BY id DESC LIMIT 1
+    """)
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {}
+    
+    # History stores a single model string; wrap in array for frontend compatibility
+    loras = []
+    if row["loras"]:
+        try:
+            loras = json.loads(row["loras"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    
+    # Try to get batch_count, auto_upload, denoising_strength from the original queue item
+    queue_id = row["queue_id"]
+    batch_count = 1
+    auto_upload = False
+    denoising_strength = 0.6
+    if queue_id:
+        cursor.execute("SELECT batch_count, auto_upload, denoising_strength FROM queue WHERE id = ?", (queue_id,))
+        q_row = cursor.fetchone()
+        if q_row:
+            batch_count = q_row["batch_count"] or 1
+            auto_upload = bool(q_row["auto_upload"])
+            denoising_strength = q_row["denoising_strength"] or 0.6
+    
+    conn.close()
+    
+    return {
+        "models": [row["model"]],
+        "steps": row["steps"],
+        "cfg_scale": row["cfg_scale"],
+        "width": row["width"],
+        "height": row["height"],
+        "loras": loras,
+        "batch_count": batch_count,
+        "seed": -1,
+        "auto_upload": auto_upload,
+        "denoising_strength": denoising_strength
+    }
+
 @app.delete("/api/queue/{item_id}")
 def delete_queue_item(item_id: int):
     conn = get_db()
@@ -850,6 +918,7 @@ def reorder_queue(req: ReorderRequest):
 def get_status():
     return {
         "running": worker.running,
+        "pause_after_current": worker.pause_after_current,
         "current_task": worker.current_task,
         "error_message": worker.error_message
     }
@@ -862,6 +931,12 @@ def post_control(ctrl: ControlAction):
     elif ctrl.action == "pause":
         worker.pause()
         return {"status": "paused"}
+    elif ctrl.action == "pause_after_current":
+        worker.pause_after_this()
+        return {"status": "pause_after_current"}
+    elif ctrl.action == "cancel_pause_after":
+        worker.cancel_pause_after()
+        return {"status": "cancel_pause_after"}
     elif ctrl.action == "clear_completed":
         conn = get_db()
         cursor = conn.cursor()
