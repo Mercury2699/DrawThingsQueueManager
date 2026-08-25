@@ -208,7 +208,13 @@
                     <div class="task-details">
                         <div class="detail-row prompt-row">
                             <span class="detail-label">Prompt:</span>
-                            <span class="detail-value" id="active-prompt">Loading...</span>
+                            <div class="active-prompt-wrapper">
+                                <div id="active-ref-thumb-container" class="active-ref-thumb-box hidden" title="i2i Reference Image">
+                                    <img id="active-ref-thumb" src="" alt="Active Ref">
+                                    <span class="thumb-i2i-badge">i2i</span>
+                                </div>
+                                <span class="detail-value" id="active-prompt">Loading...</span>
+                            </div>
                         </div>
                         <div class="task-metadata-grid">
                             <div class="detail-row">

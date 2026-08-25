@@ -761,12 +761,23 @@ function renderQueue() {
         }
         
         // i2i badge
-        const i2iBadge = item.init_image ? '<span class="badge badge-i2i">i2i</span>' : '';
+        const i2iBadge = item.init_image ? `<span class="badge badge-i2i" title="img2img (Denoising: ${parseFloat(item.denoising_strength || 0.6).toFixed(2)})">i2i (${parseFloat(item.denoising_strength || 0.6).toFixed(2)})</span>` : '';
+        
+        // i2i reference image thumbnail
+        const refThumbHtml = item.init_image ? `
+            <div class="queue-item-thumb-wrapper" title="i2i Reference Image (Denoising: ${parseFloat(item.denoising_strength || 0.6).toFixed(2)})" ${item.status === 'pending' ? `onclick="openEditModal(${item.id})"` : ''}>
+                <img class="queue-item-thumb" src="data:image/png;base64,${item.init_image}" alt="Ref">
+                <span class="thumb-i2i-badge">i2i</span>
+            </div>
+        ` : '';
         
         return `
             <div class="${cardClass}" draggable="true" data-id="${item.id}" ondragstart="handleDragStart(event)" ondragover="handleDragOver(event)" ondrop="handleDrop(event)" ondragend="handleDragEnd(event)">
                 <div class="queue-item-top">
-                    <div class="queue-item-prompt" title="${item.prompt}">${item.prompt}</div>
+                    <div class="queue-item-content">
+                        ${refThumbHtml}
+                        <div class="queue-item-prompt" title="${item.prompt}">${item.prompt}</div>
+                    </div>
                     <div class="queue-item-actions">
                         <button class="btn-card-action" onclick="moveQueueItem(${item.id}, 'up')" title="Move Up" ${idx === 0 ? 'disabled' : ''}>
                             <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
@@ -959,6 +970,15 @@ async function pollStatus() {
             document.getElementById('active-seed').innerText = data.current_task.seed;
             document.getElementById('active-progress-text').innerText = `Image ${data.current_task.image_index}/${data.current_task.total_images}`;
             document.getElementById('active-progress-bar').style.width = `${data.current_task.percentage}%`;
+            
+            const activeThumbBox = document.getElementById('active-ref-thumb-container');
+            const activeThumbImg = document.getElementById('active-ref-thumb');
+            if (data.current_task.init_image && activeThumbBox && activeThumbImg) {
+                activeThumbImg.src = 'data:image/png;base64,' + data.current_task.init_image;
+                activeThumbBox.classList.remove('hidden');
+            } else if (activeThumbBox) {
+                activeThumbBox.classList.add('hidden');
+            }
             
             // Auto refresh queue when generating to update active class in lists
             refreshQueue();

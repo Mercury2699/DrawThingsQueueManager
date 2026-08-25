@@ -299,7 +299,9 @@ class QueueWorker:
                         "seed": seed,
                         "image_index": current_image_idx + 1,
                         "total_images": total_images,
-                        "percentage": int((current_image_idx / total_images) * 100)
+                        "percentage": int((current_image_idx / total_images) * 100),
+                        "init_image": init_image,
+                        "denoising_strength": denoising_strength
                     }
                     
                     # Call API
