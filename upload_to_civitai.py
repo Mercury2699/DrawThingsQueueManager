@@ -294,13 +294,26 @@ def get_blurhash(local_file):
         return "L6PZ|aJ-0y~w.w_N_4ob_4-;_4W["
 
 def post_with_retry(session, url, **kwargs):
-    max_retries = 5
+    max_retries = 6
     for attempt in range(max_retries):
         try:
             resp = session.post(url, **kwargs)
-            if resp.status_code >= 500 or resp.status_code == 408:
+            if resp.status_code == 429:
+                # Rate limited — respect Retry-After header if present
+                retry_after = resp.headers.get('Retry-After')
+                if retry_after:
+                    try:
+                        wait_time = int(retry_after) + 1
+                    except ValueError:
+                        wait_time = 30
+                else:
+                    wait_time = min(15 * (2 ** attempt), 120)  # 15s, 30s, 60s, 120s
+                print(f"   [WARNING] Rate limited (429) on {url.split('/')[-1]}. Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...")
+                time.sleep(wait_time)
+                continue
+            if resp.status_code >= 500 or resp.status_code in (408, 404):
                 wait_time = 2 ** attempt + 2
-                print(f"   [WARNING] Server error {resp.status_code} on POST {url}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+                print(f"   [WARNING] Server error {resp.status_code} on POST {url.split('/')[-1]}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             return resp
@@ -308,14 +321,24 @@ def post_with_retry(session, url, **kwargs):
             if attempt == max_retries - 1:
                 raise
             wait_time = 2 ** attempt + 2
-            print(f"   [WARNING] Network error {e} on POST {url}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+            print(f"   [WARNING] Network error {e} on POST {url.split('/')[-1]}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
             time.sleep(wait_time)
 
+# Pacing delay between API calls to avoid rate limits
+API_PACE_DELAY = 1.5   # seconds between image uploads within a group
+GROUP_PACE_DELAY = 3.0  # seconds between finishing one group and starting the next
+
 def put_with_retry(url, data, **kwargs):
-    max_retries = 5
+    max_retries = 6
     for attempt in range(max_retries):
         try:
             resp = requests.put(url, data=data, **kwargs)
+            if resp.status_code == 429:
+                retry_after = resp.headers.get('Retry-After')
+                wait_time = (int(retry_after) + 1) if retry_after and retry_after.isdigit() else min(15 * (2 ** attempt), 120)
+                print(f"   [WARNING] Rate limited (429) on PUT. Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...")
+                time.sleep(wait_time)
+                continue
             if resp.status_code >= 500 or resp.status_code == 408:
                 wait_time = 2 ** attempt + 2
                 print(f"   [WARNING] Server error {resp.status_code} on PUT. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
@@ -522,7 +545,12 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
         f"{CIVITAI_ROOT}/api/trpc/post.addImage",
         json=payload
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        try:
+            err_detail = resp.json()
+        except Exception:
+            err_detail = resp.text[:500]
+        raise Exception(f"Failed to add image to post (HTTP {resp.status_code}): {err_detail}")
     res = resp.json()
     if 'error' in res:
         raise Exception(f"Failed to associate image to post draft: {res['error']}")
@@ -767,6 +795,15 @@ def main():
                     
                     post_id = create_post(session, post_model_version)
                     
+                    # Sort images so whitemarble models are uploaded first (index 0 = cover image)
+                    def _model_sort_key(item):
+                        _img_path, _orig_idx, _meta = item
+                        model_name = (_meta.get('Model') or '').lower()
+                        if 'whitemarble' in model_name:
+                            return (0, _orig_idx)
+                        return (1, _orig_idx)
+                    grp_images = sorted(grp_images, key=_model_sort_key)
+                    
                     # Upload and add all images in this prompt group
                     for index, (img_path, original_idx, meta) in enumerate(grp_images):
                         model_version = resolve_model_version_id(img_path, original_idx, meta)
@@ -783,6 +820,10 @@ def main():
                             model_version_id=model_version,
                             normalized_mapping=normalized_mapping
                         )
+                        
+                        # Pace between image uploads to avoid rate limits
+                        if index < len(grp_images) - 1:
+                            time.sleep(API_PACE_DELAY)
                         
                     # Add tags
                     for tag in args.tags:
@@ -802,7 +843,9 @@ def main():
                     print(f"\n   ❌ Error uploading group '{display_prompt}': {e}")
                     print(f"   ⏭️  Skipping to next group...")
                     failed_groups.append((display_prompt, len(grp_images), str(e)))
-                    continue
+                
+                # Pace between groups to avoid rate limits
+                time.sleep(GROUP_PACE_DELAY)
             
             if failed_groups:
                 print(f"\n⚠️  {len(failed_groups)} group(s) failed to upload:")
