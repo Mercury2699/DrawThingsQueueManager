@@ -295,25 +295,45 @@ def get_blurhash(local_file):
 
 def post_with_retry(session, url, **kwargs):
     max_retries = 6
+    last_resp = None
     for attempt in range(max_retries):
         try:
             resp = session.post(url, **kwargs)
+            last_resp = resp
             if resp.status_code == 429:
-                # Rate limited — respect Retry-After header if present
+                err_detail = ""
+                try:
+                    data = resp.json()
+                    err_detail = data.get('error', {}).get('json', {}).get('message') or data.get('message') or str(data)
+                except Exception:
+                    err_detail = resp.text[:200]
+                
+                if attempt == max_retries - 1:
+                    print(f"   [ERROR] Rate limited (429) on {url.split('/')[-1]} after {max_retries} attempts: {err_detail}", flush=True)
+                    return resp
+                    
                 retry_after = resp.headers.get('Retry-After')
                 if retry_after:
                     try:
                         wait_time = int(retry_after) + 1
                     except ValueError:
-                        wait_time = 30
+                        try:
+                            import email.utils
+                            target_time = email.utils.parsedate_to_datetime(retry_after).timestamp()
+                            wait_time = max(int(target_time - time.time()) + 1, 5)
+                        except Exception:
+                            wait_time = 30
                 else:
-                    wait_time = min(15 * (2 ** attempt), 120)  # 15s, 30s, 60s, 120s
-                print(f"   [WARNING] Rate limited (429) on {url.split('/')[-1]}. Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...")
+                    wait_time = min(15 * (2 ** attempt), 120)  # 15s, 30s, 60s, 120s, 120s, 120s
+                print(f"   [WARNING] Rate limited (429) on {url.split('/')[-1]} ({err_detail}). Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...", flush=True)
                 time.sleep(wait_time)
                 continue
             if resp.status_code >= 500 or resp.status_code in (408, 404):
+                if attempt == max_retries - 1:
+                    print(f"   [ERROR] Server error {resp.status_code} on POST {url.split('/')[-1]} after {max_retries} attempts.", flush=True)
+                    return resp
                 wait_time = 2 ** attempt + 2
-                print(f"   [WARNING] Server error {resp.status_code} on POST {url.split('/')[-1]}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+                print(f"   [WARNING] Server error {resp.status_code} on POST {url.split('/')[-1]}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...", flush=True)
                 time.sleep(wait_time)
                 continue
             return resp
@@ -321,27 +341,36 @@ def post_with_retry(session, url, **kwargs):
             if attempt == max_retries - 1:
                 raise
             wait_time = 2 ** attempt + 2
-            print(f"   [WARNING] Network error {e} on POST {url.split('/')[-1]}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+            print(f"   [WARNING] Network error {e} on POST {url.split('/')[-1]}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...", flush=True)
             time.sleep(wait_time)
+    return last_resp
 
 # Pacing delay between API calls to avoid rate limits
-API_PACE_DELAY = 1.5   # seconds between image uploads within a group
-GROUP_PACE_DELAY = 3.0  # seconds between finishing one group and starting the next
+API_PACE_DELAY = 2.0   # seconds between image uploads within a group
+GROUP_PACE_DELAY = 5.0  # seconds between finishing one group and starting the next
 
 def put_with_retry(url, data, **kwargs):
     max_retries = 6
+    last_resp = None
     for attempt in range(max_retries):
         try:
             resp = requests.put(url, data=data, **kwargs)
+            last_resp = resp
             if resp.status_code == 429:
+                if attempt == max_retries - 1:
+                    print(f"   [ERROR] Rate limited (429) on PUT after {max_retries} attempts.", flush=True)
+                    return resp
                 retry_after = resp.headers.get('Retry-After')
                 wait_time = (int(retry_after) + 1) if retry_after and retry_after.isdigit() else min(15 * (2 ** attempt), 120)
-                print(f"   [WARNING] Rate limited (429) on PUT. Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...")
+                print(f"   [WARNING] Rate limited (429) on PUT. Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...", flush=True)
                 time.sleep(wait_time)
                 continue
             if resp.status_code >= 500 or resp.status_code == 408:
+                if attempt == max_retries - 1:
+                    print(f"   [ERROR] Server error {resp.status_code} on PUT after {max_retries} attempts.", flush=True)
+                    return resp
                 wait_time = 2 ** attempt + 2
-                print(f"   [WARNING] Server error {resp.status_code} on PUT. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+                print(f"   [WARNING] Server error {resp.status_code} on PUT. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...", flush=True)
                 time.sleep(wait_time)
                 continue
             return resp
@@ -349,12 +378,13 @@ def put_with_retry(url, data, **kwargs):
             if attempt == max_retries - 1:
                 raise
             wait_time = 2 ** attempt + 2
-            print(f"   [WARNING] Network error {e} on PUT. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...")
+            print(f"   [WARNING] Network error {e} on PUT. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...", flush=True)
             time.sleep(wait_time)
+    return last_resp
 
 def upload_image(session, local_file):
     filename = os.path.basename(local_file)
-    print(f"   Uploading S3 ticket for {filename}...")
+    print(f"   Uploading S3 ticket for {filename}...", flush=True)
     resp = post_with_retry(
         session,
         f"{CIVITAI_ROOT}/api/v1/image-upload",
@@ -363,7 +393,14 @@ def upload_image(session, local_file):
             "metadata": {}
         }
     )
-    resp.raise_for_status()
+    if resp is None:
+        raise Exception(f"Failed to get S3 ticket for {filename}: request failed (no response returned)")
+    if not resp.ok:
+        try:
+            err_detail = resp.json()
+        except Exception:
+            err_detail = resp.text[:500]
+        raise Exception(f"Failed to get S3 ticket for {filename} (HTTP {resp.status_code}): {err_detail}")
     ticket = resp.json()
     
     upload_id = ticket['id']
@@ -381,7 +418,10 @@ def upload_image(session, local_file):
         data=file_data,
         headers={'Content-Length': str(len(file_data))}
     )
-    put_resp.raise_for_status()
+    if put_resp is None:
+        raise Exception(f"Failed to upload image {filename} to S3: request failed (no response returned)")
+    if not put_resp.ok:
+        raise Exception(f"Failed to upload image {filename} to S3 (HTTP {put_resp.status_code}): {put_resp.text[:500]}")
         
     return upload_id
 
@@ -433,13 +473,20 @@ def create_post(session, model_version_id=None):
         f"{CIVITAI_ROOT}/api/trpc/post.create",
         json=payload
     )
-    resp.raise_for_status()
+    if resp is None:
+        raise Exception("Failed to create post draft: request failed (no response returned)")
+    if not resp.ok:
+        try:
+            err_detail = resp.json()
+        except Exception:
+            err_detail = resp.text[:500]
+        raise Exception(f"Failed to create post draft (HTTP {resp.status_code}): {err_detail}")
     res = resp.json()
     if isinstance(res, dict) and 'error' in res:
         raise Exception(f"Failed to create post draft: {res['error']}")
         
     post_id = extract_civitai_id(res)
-    print(f"   Created draft post container (ID: {post_id})")
+    print(f"   Created draft post container (ID: {post_id})", flush=True)
     return post_id
 
 def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, model_version_id=None, normalized_mapping=None):
@@ -545,6 +592,8 @@ def add_image_to_post(session, post_id, upload_image_id, local_file, index=0, mo
         f"{CIVITAI_ROOT}/api/trpc/post.addImage",
         json=payload
     )
+    if resp is None:
+        raise Exception("Failed to add image to post: request failed (no response returned)")
     if not resp.ok:
         try:
             err_detail = resp.json()
@@ -568,10 +617,12 @@ def add_tag_to_post(session, post_id, tag_name):
         f"{CIVITAI_ROOT}/api/trpc/post.addTag",
         json=payload
     )
-    resp.raise_for_status()
+    if resp is None or not resp.ok:
+        print(f"   [WARNING] Failed to add tag '{tag_name}' (HTTP {resp.status_code if resp else 'No response'})", flush=True)
+        return
     res = resp.json()
     if 'error' in res:
-        print(f"   [WARNING] Failed to add tag '{tag_name}': {res['error']['message']}")
+        print(f"   [WARNING] Failed to add tag '{tag_name}': {res['error'].get('message', res['error'])}", flush=True)
 
 def publish_post(session, post_id, title=None, detail=None, nsfw=False):
     payload = {
@@ -593,13 +644,20 @@ def publish_post(session, post_id, title=None, detail=None, nsfw=False):
         f"{CIVITAI_ROOT}/api/trpc/post.update",
         json=payload
     )
-    resp.raise_for_status()
+    if resp is None:
+        raise Exception("Failed to publish post: request failed (no response returned)")
+    if not resp.ok:
+        try:
+            err_detail = resp.json()
+        except Exception:
+            err_detail = resp.text[:500]
+        raise Exception(f"Failed to publish post (HTTP {resp.status_code}): {err_detail}")
     res = resp.json()
     if 'error' in res:
         raise Exception(f"Failed to publish post: {res['error']}")
     
     post_url = f"{CIVITAI_ROOT}/posts/{post_id}"
-    print(f"   ✅ Published! Link: {post_url}")
+    print(f"   ✅ Published! Link: {post_url}", flush=True)
     return post_url
 
 def load_model_mapping(mapping_arg):
@@ -879,6 +937,10 @@ def main():
                     model_version_id=model_version,
                     normalized_mapping=normalized_mapping
                 )
+                
+                # Pace between image uploads to avoid rate limits
+                if index < len(valid_image_paths) - 1:
+                    time.sleep(API_PACE_DELAY)
                 
             # Add tags
             for tag in args.tags:
