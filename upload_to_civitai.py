@@ -308,6 +308,11 @@ def post_with_retry(session, url, **kwargs):
                 except Exception:
                     err_detail = resp.text[:200]
                 
+                # If Civitai reports a daily limit, retrying in seconds will never succeed
+                if any(k in err_detail.lower() for k in ["daily limit", "tomorrow"]):
+                    print(f"   [ERROR] Daily limit reached on {url.split('/')[-1]}: {err_detail}", flush=True)
+                    return resp
+                
                 if attempt == max_retries - 1:
                     print(f"   [ERROR] Rate limited (429) on {url.split('/')[-1]} after {max_retries} attempts: {err_detail}", flush=True)
                     return resp
