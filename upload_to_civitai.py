@@ -17,6 +17,7 @@ import argparse
 import requests
 import glob
 import time
+import random
 from urllib.parse import urljoin
 from PIL import Image
 
@@ -329,7 +330,8 @@ def post_with_retry(session, url, **kwargs):
                         except Exception:
                             wait_time = 30
                 else:
-                    wait_time = min(15 * (2 ** attempt), 120)  # 15s, 30s, 60s, 120s, 120s, 120s
+                    base_wait = min(15 * (2 ** attempt), 120)
+                    wait_time = round(base_wait + random.uniform(0.5, 3.0), 2)  # Jittered backoff
                 print(f"   [WARNING] Rate limited (429) on {url.split('/')[-1]} ({err_detail}). Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...", flush=True)
                 time.sleep(wait_time)
                 continue
@@ -337,7 +339,7 @@ def post_with_retry(session, url, **kwargs):
                 if attempt == max_retries - 1:
                     print(f"   [ERROR] Server error {resp.status_code} on POST {url.split('/')[-1]} after {max_retries} attempts.", flush=True)
                     return resp
-                wait_time = 2 ** attempt + 2
+                wait_time = round(2 ** attempt + 2 + random.uniform(0.2, 1.2), 2)  # Jittered retry
                 print(f"   [WARNING] Server error {resp.status_code} on POST {url.split('/')[-1]}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...", flush=True)
                 time.sleep(wait_time)
                 continue
@@ -345,14 +347,25 @@ def post_with_retry(session, url, **kwargs):
         except (requests.exceptions.RequestException, Exception) as e:
             if attempt == max_retries - 1:
                 raise
-            wait_time = 2 ** attempt + 2
+            wait_time = round(2 ** attempt + 2 + random.uniform(0.2, 1.2), 2)
             print(f"   [WARNING] Network error {e} on POST {url.split('/')[-1]}. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...", flush=True)
             time.sleep(wait_time)
     return last_resp
 
-# Pacing delay between API calls to avoid rate limits
-API_PACE_DELAY = 2.0   # seconds between image uploads within a group
-GROUP_PACE_DELAY = 5.0  # seconds between finishing one group and starting the next
+# Pacing and jitter configuration to mimic natural human/client behavior and avoid rate limits
+API_PACE_MIN = 1.6
+API_PACE_MAX = 3.2        # Jitter between images within a group (1.6s - 3.2s)
+
+GROUP_PACE_MIN = 4.0
+GROUP_PACE_MAX = 7.5      # Jitter between prompt groups (4.0s - 7.5s)
+
+ACTION_JITTER_MIN = 0.6
+ACTION_JITTER_MAX = 1.6   # Jitter between distinct actions (post creation, upload, publish)
+
+def sleep_with_jitter(min_seconds, max_seconds):
+    """Sleep for a random float between min_seconds and max_seconds."""
+    delay = random.uniform(min_seconds, max_seconds)
+    time.sleep(delay)
 
 def put_with_retry(url, data, **kwargs):
     max_retries = 6
@@ -366,7 +379,7 @@ def put_with_retry(url, data, **kwargs):
                     print(f"   [ERROR] Rate limited (429) on PUT after {max_retries} attempts.", flush=True)
                     return resp
                 retry_after = resp.headers.get('Retry-After')
-                wait_time = (int(retry_after) + 1) if retry_after and retry_after.isdigit() else min(15 * (2 ** attempt), 120)
+                wait_time = (int(retry_after) + 1) if retry_after and retry_after.isdigit() else round(min(15 * (2 ** attempt), 120) + random.uniform(0.5, 3.0), 2)
                 print(f"   [WARNING] Rate limited (429) on PUT. Waiting {wait_time}s before retry ({attempt+1}/{max_retries})...", flush=True)
                 time.sleep(wait_time)
                 continue
@@ -374,7 +387,7 @@ def put_with_retry(url, data, **kwargs):
                 if attempt == max_retries - 1:
                     print(f"   [ERROR] Server error {resp.status_code} on PUT after {max_retries} attempts.", flush=True)
                     return resp
-                wait_time = 2 ** attempt + 2
+                wait_time = round(2 ** attempt + 2 + random.uniform(0.2, 1.2), 2)
                 print(f"   [WARNING] Server error {resp.status_code} on PUT. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...", flush=True)
                 time.sleep(wait_time)
                 continue
@@ -382,7 +395,7 @@ def put_with_retry(url, data, **kwargs):
         except (requests.exceptions.RequestException, Exception) as e:
             if attempt == max_retries - 1:
                 raise
-            wait_time = 2 ** attempt + 2
+            wait_time = round(2 ** attempt + 2 + random.uniform(0.2, 1.2), 2)
             print(f"   [WARNING] Network error {e} on PUT. Retrying ({attempt+1}/{max_retries}) in {wait_time}s...", flush=True)
             time.sleep(wait_time)
     return last_resp
@@ -411,6 +424,9 @@ def upload_image(session, local_file):
     upload_id = ticket['id']
     upload_url = ticket['uploadURL']
     
+    # Brief jitter before uploading bytes to S3
+    sleep_with_jitter(0.3, 0.7)
+    
     # Read file into memory so Content-Length is set correctly for S3 PUT
     # (streaming a file object may use chunked encoding which S3/B2 rejects with 411)
     # This also ensures retries re-send the full data instead of an empty body.
@@ -427,6 +443,9 @@ def upload_image(session, local_file):
         raise Exception(f"Failed to upload image {filename} to S3: request failed (no response returned)")
     if not put_resp.ok:
         raise Exception(f"Failed to upload image {filename} to S3 (HTTP {put_resp.status_code}): {put_resp.text[:500]}")
+    
+    # Brief jitter after S3 PUT before next action
+    sleep_with_jitter(0.2, 0.6)
         
     return upload_id
 
@@ -835,13 +854,14 @@ def main():
                 
             print(f"\n📂 Found {len(prompt_groups)} distinct prompt groups across {len(valid_image_paths)} images.")
             
+            published_posts = []
             failed_groups = []
             for p_key, group in prompt_groups.items():
                 prompt_text = group["prompt"]
                 grp_images = group["images"]
                 
                 display_prompt = prompt_text[:50] + "..." if len(prompt_text) > 50 else (prompt_text or "[No Prompt]")
-                print(f"\n📁 Processing group: '{display_prompt}' ({len(grp_images)} images)")
+                print(f"\n📁 Processing group: '{display_prompt}' ({len(grp_images)} images)", flush=True)
                 
                 try:
                     # Check if all images in this prompt group share the same model version
@@ -857,6 +877,7 @@ def main():
                         print(f"   [INFO] Multiple base models detected in group ({model_versions_in_group}). Creating a general post container.")
                     
                     post_id = create_post(session, post_model_version)
+                    sleep_with_jitter(ACTION_JITTER_MIN, ACTION_JITTER_MAX)
                     
                     # Sort images so whitemarble models are uploaded first (index 0 = cover image)
                     def _model_sort_key(item):
@@ -871,7 +892,7 @@ def main():
                     for index, (img_path, original_idx, meta) in enumerate(grp_images):
                         model_version = resolve_model_version_id(img_path, original_idx, meta)
                         model_name = meta.get('Model', 'Unknown Model')
-                        print(f"   [{index+1}/{len(grp_images)}] Uploading {os.path.basename(img_path)} (Model: {model_name} -> Version: {model_version})")
+                        print(f"   [{index+1}/{len(grp_images)}] Uploading {os.path.basename(img_path)} (Model: {model_name} -> Version: {model_version})", flush=True)
                         
                         upload_id = upload_image(session, img_path)
                         add_image_to_post(
@@ -886,32 +907,43 @@ def main():
                         
                         # Pace between image uploads to avoid rate limits
                         if index < len(grp_images) - 1:
-                            time.sleep(API_PACE_DELAY)
+                            sleep_with_jitter(API_PACE_MIN, API_PACE_MAX)
                         
                     # Add tags
-                    for tag in args.tags:
-                        add_tag_to_post(session, post_id, tag)
+                    if args.tags:
+                        sleep_with_jitter(ACTION_JITTER_MIN, ACTION_JITTER_MAX)
+                        for tag in args.tags:
+                            add_tag_to_post(session, post_id, tag)
+                            sleep_with_jitter(0.2, 0.6)
                         
                     # Publish post
+                    sleep_with_jitter(ACTION_JITTER_MIN, ACTION_JITTER_MAX)
                     title = args.title or (prompt_text[:100] if prompt_text else "Showcase Image Group")
                     post_url = publish_post(session, post_id, title=title, detail=args.description, nsfw=args.nsfw)
                     
                     # Record filepath -> post_url mapping for --output-json
                     if post_url:
+                        published_posts.append((post_id, post_url, display_prompt))
                         for img_path, _, _ in grp_images:
                             upload_result[os.path.abspath(img_path)] = post_url
+                        print(f"   📊 Progress: {len(published_posts)}/{len(prompt_groups)} groups published.", flush=True)
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
-                    print(f"\n   ❌ Error uploading group '{display_prompt}': {e}")
-                    print(f"   ⏭️  Skipping to next group...")
+                    print(f"\n   ❌ Error uploading group '{display_prompt}': {e}", flush=True)
                     failed_groups.append((display_prompt, len(grp_images), str(e)))
+                    if any(k in str(e).lower() for k in ["daily limit", "tomorrow"]):
+                        print(f"\n🛑 Civitai daily post limit reached! Halting further uploads.", flush=True)
+                        print(f"📊 Stats: Successfully published {len(published_posts)} post(s) in this session before hitting the limit.\n", flush=True)
+                        break
+                    print(f"   ⏭️  Skipping to next group...", flush=True)
                 
                 # Pace between groups to avoid rate limits
-                time.sleep(GROUP_PACE_DELAY)
+                sleep_with_jitter(GROUP_PACE_MIN, GROUP_PACE_MAX)
             
+            print(f"\n📈 Summary: {len(published_posts)} group(s) published, {len(failed_groups)} group(s) failed.", flush=True)
             if failed_groups:
-                print(f"\n⚠️  {len(failed_groups)} group(s) failed to upload:")
+                print(f"⚠️  Failed group(s):")
                 for fg_prompt, fg_count, fg_err in failed_groups:
                     print(f"   - '{fg_prompt}' ({fg_count} images): {fg_err}")
                 sys.exit(1)
@@ -925,6 +957,7 @@ def main():
             first_model_version = resolve_model_version_id(valid_image_paths[0], 0, first_meta)
             
             post_id = create_post(session, first_model_version)
+            sleep_with_jitter(ACTION_JITTER_MIN, ACTION_JITTER_MAX)
             
             for index, img_path in enumerate(valid_image_paths):
                 meta = extract_metadata_from_png(img_path) if index > 0 else first_meta
@@ -945,13 +978,17 @@ def main():
                 
                 # Pace between image uploads to avoid rate limits
                 if index < len(valid_image_paths) - 1:
-                    time.sleep(API_PACE_DELAY)
+                    sleep_with_jitter(API_PACE_MIN, API_PACE_MAX)
                 
             # Add tags
-            for tag in args.tags:
-                add_tag_to_post(session, post_id, tag)
+            if args.tags:
+                sleep_with_jitter(ACTION_JITTER_MIN, ACTION_JITTER_MAX)
+                for tag in args.tags:
+                    add_tag_to_post(session, post_id, tag)
+                    sleep_with_jitter(0.2, 0.6)
                 
             # Publish post
+            sleep_with_jitter(ACTION_JITTER_MIN, ACTION_JITTER_MAX)
             post_url = publish_post(session, post_id, title=args.title, detail=args.description, nsfw=args.nsfw)
             
             # Record filepath -> post_url mapping for --output-json
